@@ -1,0 +1,6 @@
+{
+  "name": "اطلس جلسه ۰۱",
+  "description": "دستیار هوشمند جلسات، تایپ صوتی آنی و هوش مصنوعی Gemini",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

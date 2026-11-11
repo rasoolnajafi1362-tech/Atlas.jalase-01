@@ -1440,7 +1440,7 @@ $specialContext
         }
 
         val prompt = """
-شما سیستم جستجوی صوتی و پرسش‌وپاسخ هوشمند در آرشیو جلسات هیئت‌مدیره سامانه «اطلس جلسه ۰۱» هستید.
+شما سیستم جستجوی صوتی و پرسش‌وپاسخ هوشمند در آرشیو جلسات سامانه «اطلس جلسه ۰۱» هستید.
 کاربر یک پرسش صوتی یا کلامی مستقیم از آرشیو مطرح کرده است:
 «$trimmedQuery»
 
@@ -1449,7 +1449,7 @@ $archiveSummary
 
 دستورالعمل‌ها:
 ۱. به پرسش کاربر به صورت مستقیم، دقیق، مستند و تحلیلی در ۲ تا ۴ بند فارسی فاخر و رسمی پاسخ دهید (aiAnswer).
-۲. اگر کاربر درباره مصوبات یک پروژه، شخص خاص (مانند سخنران)، مهلت‌ها یا موضوعی خاص پرسیده، به طور مشخص بیان کنید چه چیزهایی تصویب شده، چه کسی مسئول بوده و چه وضعیتی دارد.
+۲. اگر کاربر درباره مصوبات یک پروژه، شخص یا واحد مشخص، مهلت‌ها یا موضوعی خاص پرسیده، به طور مشخص بیان کنید چه چیزهایی تصویب شده، چه کسی مسئول بوده و چه وضعیتی دارد.
 ۳. در بخش matchedSessions، جلساتی را که مستقیماً به این پرسش پاسخ می‌دهند همراه با امتیاز ارتباط (relevanceScore بین 0 تا 100)، خلاصه گزیده (matchedSnippet) و لیست مصوبات مرتبط (matchedResolutions) ذکر کنید.
 ۴. در بخش relatedTopics، دو تا سه پرسش کوتاه مرتبط برای پیشنهاد به کاربر ارائه دهید.
 
@@ -1567,7 +1567,7 @@ $archiveSummary
                         query = trimmedQuery,
                         aiAnswer = answer,
                         matchedSessions = if (matchedSessionsList.isNotEmpty()) matchedSessionsList else generateContextualArchiveSearchFallback(trimmedQuery, sessions).matchedSessions,
-                        relatedTopics = if (relatedTopicsList.isNotEmpty()) relatedTopicsList else listOf("مصوبات زنجیره سرد", "مهلت‌های سخنران", "بودجه و اعتبارات پالت"),
+                        relatedTopics = relatedTopicsList,
                         timestamp = System.currentTimeMillis()
                     )
                 )
@@ -1579,43 +1579,49 @@ $archiveSummary
         }
     }
 
+    /**
+     * [Atlas-01 v1.1.0] پاسخ‌های موضوعی از پیش‌نویس‌شده (isBudget/isHr/isColdChain و مشابه) حذف شدند.
+     * این متد اکنون فقط جستجوی محلی کلیدواژه‌ای روی داده واقعی جلسات انجام می‌دهد
+     * و در صورت نبود نتیجه، صادقانه اعلام می‌کند که چیزی یافت نشد.
+     */
     fun generateContextualArchiveSearchFallback(
         query: String,
         sessions: List<MeetingSession>
     ): AiArchiveSearchResult {
-        val qLower = query.lowercase().trim()
-
-        // Match cold chain / logistics
-        val isColdChain = qLower.contains("زنجیره") || qLower.contains("سرد") || qLower.contains("لجستیک") || qLower.contains("پروژه") || qLower.contains("دما")
-        val isHr = qLower.contains("استخدام") || qLower.contains("منابع انسانی") || qLower.contains("hr") || qLower.contains("کاظمی") || qLower.contains("انبار")
-        val isRasool = false // [Atlas-01 v1.1.0] پاسخ ساختگی شخصی‌سازی‌شده غیرفعال شد
-        val isBudget = qLower.contains("بودجه") || qLower.contains("مالی") || qLower.contains("پالت") || qLower.contains("اعتبار")
+        val tokens = query.lowercase()
+            .split(Regex("[\\s،؛,.:؟?!()\\[\\]]+"))
+            .map { it.trim() }
+            .filter { it.length >= 3 }
+            .distinct()
 
         val matchedSessions = mutableListOf<AiArchiveMatchedSession>()
 
         sessions.forEach { s ->
-            val matchTitle = s.title.lowercase().contains(qLower) || (isColdChain && s.title.contains("زنجیره")) || (isHr && s.scope == "interview_hr")
+            val titleLower = s.title.lowercase()
+            val matchTitle = tokens.any { t -> titleLower.contains(t) }
+
             val matchingNotes = s.notes.filter { n ->
-                n.text.lowercase().contains(qLower) ||
-                    (isColdChain && (n.text.contains("زنجیره") || n.text.contains("سنسور") || n.text.contains("دما") || n.text.contains("ناوگان"))) ||
-                    (isHr && (n.text.contains("استخدام") || n.text.contains("حقوق") || n.text.contains("کاندیدا"))) ||
-                    (isRasool && n.speaker.contains("رسول")) ||
-                    (isBudget && (n.text.contains("بودجه") || n.text.contains("پالت") || n.text.contains("مالی")))
+                val noteLower = n.text.lowercase()
+                val speakerLower = n.speaker.lowercase()
+                tokens.any { t -> noteLower.contains(t) } || tokens.any { t -> speakerLower.contains(t) }
             }
 
-            if (matchTitle || matchingNotes.isNotEmpty() || (isColdChain && s.opsData.enabled) || (isHr && s.hrData.enabled)) {
-                val snippet = when {
-                    matchingNotes.isNotEmpty() -> matchingNotes.first().text
-                    s.opsData.enabled -> "شاخص‌های ۵PL: ${s.opsData.fleetEff} | ${s.opsData.coldChain} | دستور: ${s.opsData.summary}"
-                    s.hrData.enabled -> "ارزیابی کاندیدا: ${s.hrData.candidate} (${s.hrData.score}) | تصمیم: ${s.hrData.decision}"
-                    else -> s.notes.firstOrNull()?.text ?: s.title
-                }
+            val matchingTranscriptions = s.transcriptions.filter { tr ->
+                val trLower = tr.text.lowercase()
+                tokens.any { t -> trLower.contains(t) }
+            }
+
+            val hitCount = matchingNotes.size + matchingTranscriptions.size + if (matchTitle) 1 else 0
+            if (hitCount > 0) {
+                val snippet = matchingNotes.firstOrNull()?.text
+                    ?: matchingTranscriptions.firstOrNull()?.let { "[${it.speaker}]: ${it.text}" }
+                    ?: s.title
                 matchedSessions.add(
                     AiArchiveMatchedSession(
                         sessionId = s.id,
                         sessionTitle = s.title.ifBlank { "جلسه سازمانی" },
                         sessionDate = s.date,
-                        relevanceScore = if (matchTitle && matchingNotes.isNotEmpty()) 96 else 88,
+                        relevanceScore = (70 + hitCount * 5).coerceAtMost(99),
                         matchedSnippet = snippet,
                         matchedResolutions = matchingNotes.map { "[${it.speaker}]: ${it.text} (مهلت: ${it.due})" }
                     )
@@ -1623,56 +1629,26 @@ $archiveSummary
             }
         }
 
-        val primaryMatched = matchedSessions.firstOrNull()
-        val fallbackSession = sessions.firstOrNull()
-
-        val answerText = when {
-            isColdChain -> """
-بر اساس بررسی هوشمند آرشیو جلسات، در خصوص «پروژه زنجیره سرد و لجستیک دارو»، موارد راهبردی زیر در جلسه ${primaryMatched?.sessionDate ?: fallbackSession?.date ?: "اخیر"} به تصویب هیئت‌مدیره رسیده است:
-
-۱. تجهیز و کالیبراسیون ناوگان ۵PL: مصوب شد کلیه خودروهای استیجاری و ملکی حمل دارو تا پایان ماه جاری به سنسورهای پایش آنلاین دما و رطوبت با تلرانس مجاز (۲°C تا ۸°C) مجهز شوند.
-۲. مسئولیت و راهبری عملیاتی: جناب آقای سخنران (مدیر عملیات) موظف شد گزارش هفتگی انطباق با استاندارد WHO GDP و شیوه‌نامه خسارت بیمه محمولات را مستقیماً به برج کنترل ارائه نماید.
-۳. ضمانت‌های اجرایی و جرایم دیرکرد: مقرر گردید جریمه افت دما ناشی از تأخیرهای گمرکی مورد بازبینی قرار گیرد و تبصره بیمه‌ای برای پوشش خسارات احتمالی تنظیم شود.
-            """.trimIndent()
-
-            isHr -> """
-بر اساس سوابق کمیته جذب و منابع انسانی در آرشیو:
-۱. جایگاه: سرپرستی عملیات شبکه توزیع و انبار سرد.
-۲. کاندیدای منتخب: مهندس آرش کاظمی با امتیاز ۹۱ از ۱۰۰ (Strong Hire).
-۳. مصوبه حقوقی و مالی: پکیج حقوقی بر مبنای KPI کاهش ضایعات انبار تایید مشروط گردید و قرارداد با دوره آزمایشی سه‌ماهه به تصویب رسید.
-            """.trimIndent()
-
-            isRasool -> """
-تعهدات و مصوبات ثبت‌شده به نام جناب آقای سخنران در جلسات بایگانی‌شده شامل موارد زیر است:
-۱. پیگیری ارتقای بهره‌وری ناوگان لجستیک و نظارت بر پایش آنلاین سنسورهای دمایی.
-۲. امضای مشترک تبصره متمم بودجه اضطراری پیش از ارسال به مجمع.
-۳. ارائه گزارش پیشرفت هفتگی مصوبات دوره قبل در ابتدای هر جلسه رسمی.
-            """.trimIndent()
-
-            else -> """
-بر اساس واکاوی هوشمند آرشیو جلسات و سوابق مصوبات هیئت‌مدیره پیرامون «$query»:
-در مجموع ${matchedSessions.size.coerceAtLeast(1)} جلسه و پرونده مرتبط شناسایی شد. تصمیمات کلیدی بر مبنای انضباط در تخصیص منابع، رعایت ضرب‌الاجل‌های تعیین‌شده و تعیین مسئول مستقیم برای کلیه اقدامات اجرایی اتخاذ گردیده است.
-            """.trimIndent()
+        val answerText = if (matchedSessions.isEmpty()) {
+            "در آرشیو جلسات هیچ نتیجه مرتبطی با «$query» یافت نشد. " +
+                "کلید Gemini API تنظیم نشده یا سرویس در دسترس نبود و جستجوی محلی کلیدواژه‌ای هم مورد منطبقی نیافت. " +
+                "لطفاً عبارت را دقیق‌تر کنید یا کلید API را در تب هوش مصنوعی وارد نمایید."
+        } else {
+            buildString {
+                appendLine("جستجوی محلی (بدون Gemini) ${matchedSessions.size} جلسه مرتبط با «$query» یافت کرد:")
+                matchedSessions.take(3).forEachIndexed { i, m ->
+                    appendLine("${i + 1}. «${m.sessionTitle}» (${m.sessionDate}):")
+                    appendLine("   ${m.matchedSnippet.take(220)}")
+                }
+                append("برای پاسخ تحلیلی و مستند، کلید Gemini API را در تب هوش مصنوعی وارد کنید.")
+            }.trim()
         }
 
         return AiArchiveSearchResult(
             query = query,
             aiAnswer = answerText,
-            matchedSessions = if (matchedSessions.isNotEmpty()) matchedSessions else listOf(
-                AiArchiveMatchedSession(
-                    sessionId = fallbackSession?.id ?: "SES-DEFAULT",
-                    sessionTitle = fallbackSession?.title ?: "جلسه راهبردی هیئت‌مدیره و زنجیره سرد",
-                    sessionDate = fallbackSession?.date ?: "1405/08/15",
-                    relevanceScore = 92,
-                    matchedSnippet = fallbackSession?.notes?.firstOrNull()?.text ?: "مصوب شد پایش دقیق استانداردها در دستور کار قرار گیرد.",
-                    matchedResolutions = fallbackSession?.notes?.map { "[${it.speaker}]: ${it.text}" } ?: listOf("تجهیز ناوگان حمل دارو به سنسورهای پایش آنلاین دما")
-                )
-            ),
-            relatedTopics = listOf(
-                "مصوبات مربوط به پروژه زنجیره سرد و جریمه‌ها",
-                "تعهدات و وظایف سخنران تا پایان هفته",
-                "تصمیمات در خصوص بودجه پالت و WMS"
-            ),
+            matchedSessions = matchedSessions,
+            relatedTopics = emptyList(),
             timestamp = System.currentTimeMillis()
         )
     }
@@ -2783,7 +2759,8 @@ $effectiveTypedText
         }.trim()
         if (fromNotes.isNotBlank()) return fromNotes
 
-        return "مصوب شد سامانه پایش برخط دمای ناوگان زنجیره سرد با مسئولیت سخنران تا پایان هفته عملیاتی گردد؛ همچنین مقرر شد مدیر مالی متمم بودجه تجهیز سنسورها را تا فردا به هیئت‌مدیره ارائه نماید."
+        // [Atlas-01 v1.1.0] متن جلسه ساختگی در غیاب ورودی واقعی تزریق نمی‌شود؛ خروجی خالی معتبر است.
+        return ""
     }
 
     fun analyzeTypedMeetingTextFallback(
@@ -2792,6 +2769,16 @@ $effectiveTypedText
         autoAnalyzed: Boolean = true
     ): TypedMeetingMinutesAnalysis {
         val effectiveText = buildEffectiveTypedMeetingText(typedText, session)
+        if (effectiveText.isBlank()) {
+            return TypedMeetingMinutesAnalysis(
+                sourceTypedText = "",
+                formalMinutesText = "متن جلسه‌ای برای تحلیل یافت نشد؛ ابتدا متن را تایپ یا پیاده‌سازی صوتی ثبت کنید.",
+                decisionsMade = emptyList(),
+                assignedTasksByPerson = emptyList(),
+                autoAnalyzed = autoAnalyzed,
+                timestamp = System.currentTimeMillis()
+            )
+        }
         val cleanTitle = session.title.ifBlank { "جلسه راهبردی هیئت‌مدیره و لجستیک ۵PL" }
 
         val rawLines = effectiveText
@@ -2849,7 +2836,7 @@ $effectiveTypedText
 
             val deadlineMatch = Regex("(تا\\s+[^،.؛]+|\\d{4}/\\d{2}/\\d{2}|پایان هفته|پایان ماه|فردا|۴۸ ساعت|۷۲ ساعت)")
                 .find(statementBody)?.value?.trim()
-                ?: "تا پایان هفته جاری"
+                ?: "بدون مهلت مشخص (DEADLINE_REQUIRED)"
 
             val priority = when {
                 statementBody.contains("فوری") || statementBody.contains("بحرانی") || statementBody.contains("الزامی") || statementBody.contains("مصوب") -> "فوری"

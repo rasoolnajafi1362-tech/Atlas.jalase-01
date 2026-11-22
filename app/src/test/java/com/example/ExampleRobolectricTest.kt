@@ -102,10 +102,9 @@ class ExampleRobolectricTest {
         val app = ApplicationProvider.getApplicationContext<android.app.Application>()
         val vm = com.example.viewmodel.MeetingViewModel(app)
 
-        val targetMember = vm.activeSession.value.members.first()
-        // set absent
-        vm.updateMember(0, targetMember.copy(isPresent = false))
-        assertFalse(vm.activeSession.value.members.first().isPresent)
+        vm.addAttendeeWithDetails("شرکت‌کنندهٔ آزمایشی", "عضو", "آزمون", isPresent = false)
+        val targetMember = vm.activeSession.value.members.single()
+        assertFalse(targetMember.isPresent)
 
         val qrPayload = com.example.util.QrCodeGenerator.createMemberCheckInPayload(
             sessionId = vm.activeSession.value.id,
@@ -127,10 +126,9 @@ class ExampleRobolectricTest {
         val app = ApplicationProvider.getApplicationContext<android.app.Application>()
         val vm = com.example.viewmodel.MeetingViewModel(app)
 
-        // Set all members absent first
-        vm.activeSession.value.members.forEachIndexed { idx, m ->
-            vm.updateMember(idx, m.copy(isPresent = false))
-        }
+        vm.addAttendeeWithDetails("عضو آزمایشی اول", "عضو", "آزمون", isPresent = false)
+        vm.addAttendeeWithDetails("عضو آزمایشی دوم", "عضو", "آزمون", isPresent = false)
+        assertEquals(2, vm.activeSession.value.members.size)
         assertTrue(vm.activeSession.value.members.none { it.isPresent })
 
         // Generate Session QR Payload in Setup tab format
@@ -663,8 +661,7 @@ class ExampleRobolectricTest {
             selectedBoardMemberName = null
         )
 
-        // Should have multi-period trend points ending with current session
-        assertTrue(analytics.trendSeries.size >= 5)
+        assertEquals(listOf(archivedSession.id, session.id), analytics.trendSeries.map { it.sessionId })
         val latestPoint = analytics.trendSeries.last()
         assertEquals(session.id, latestPoint.sessionId)
         assertTrue(latestPoint.attendanceRatePercent in 0..100)
@@ -675,14 +672,18 @@ class ExampleRobolectricTest {
         assertTrue(analytics.boardMembers.any { it.name.contains("سخنران") })
 
         // Filter by specific board member
+        val selected = roomAttendees.first()
         val filteredAnalytics = com.example.ui.components.BoardAnalyticsEngine.computeAnalytics(
             activeSession = session,
             roomAttendees = roomAttendees,
-            archiveList = listOf(archivedSession),
-            selectedBoardMemberName = "سخنران"
+            archiveList = emptyList(),
+            selectedBoardMemberName = selected.name
         )
-        assertEquals(1, filteredAnalytics.boardMembers.size)
-        assertEquals("سخنران", filteredAnalytics.boardMembers.first().name)
+        val performance = filteredAnalytics.boardMembers.single()
+        assertEquals(selected.id, performance.memberId)
+        assertEquals(1, performance.sessionsTotal)
+        assertEquals(if (selected.isPresent) 1 else 0, performance.sessionsPresent)
+        assertEquals(1, filteredAnalytics.trendSeries.size)
     }
 
     @Test

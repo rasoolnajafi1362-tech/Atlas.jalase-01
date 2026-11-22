@@ -125,15 +125,6 @@ object BoardAnalyticsEngine {
             .filter { it.id != activeSession.id }
             .reversed()
 
-        // If archive has fewer than 4 historical points, synthesize realistic historical board checkpoints
-        // so the time-series trend chart always renders a meaningful multi-session trajectory.
-        val baselineTrendPoints = buildBaselineHistoricalPoints(
-            activeSession = activeSession,
-            effectiveAttendees = effectiveAttendees,
-            existingHistoricalCount = historicalSessions.size,
-            selectedBoardMemberName = selectedBoardMemberName
-        )
-
         val archivedTrendPoints = historicalSessions.mapIndexed { idx, s ->
             buildPointFromSession(
                 session = s,
@@ -148,7 +139,7 @@ object BoardAnalyticsEngine {
             selectedBoardMemberName = selectedBoardMemberName
         )
 
-        val allTrendPoints = (baselineTrendPoints + archivedTrendPoints + currentPoint).takeLast(7)
+        val allTrendPoints = (archivedTrendPoints + currentPoint).takeLast(7)
 
         // Compute per-board-member metrics over the last quarter
         val allSessions = historicalSessions + activeSession
@@ -156,9 +147,9 @@ object BoardAnalyticsEngine {
             val memberName = entity.name.ifBlank { "عضو هیئت‌مدیره ${idx + 1}" }
 
             // Historical attendance across sessions
-            var presentSessions = 0
-            var totalMemberSessions = 0
-            allSessions.forEach { sess ->
+            var presentSessions = if (entity.isPresent) 1 else 0
+            var totalMemberSessions = 1
+            historicalSessions.forEach { sess ->
                 val match = sess.members.find {
                     it.id == entity.id || (it.name.isNotBlank() && it.name.equals(memberName, ignoreCase = true))
                 }
@@ -167,16 +158,7 @@ object BoardAnalyticsEngine {
                     if (match.isPresent) presentSessions++
                 }
             }
-            // Include baseline historical sessions for realistic quarterly board tracking
-            val extraTotal = 4
-            val extraPresent = when {
-                entity.isPresent && idx % 3 == 0 -> 4
-                entity.isPresent -> 3
-                else -> 2
-            }
-            val combinedPresent = presentSessions + extraPresent
-            val combinedTotal = max(1, totalMemberSessions + extraTotal)
-            val attRate = ((combinedPresent * 100f) / combinedTotal).roundToInt().coerceIn(0, 100)
+            val attRate = ((presentSessions * 100f) / totalMemberSessions).roundToInt().coerceIn(0, 100)
 
             // Action items assigned to this board member across notes, AI extracted actions, and Room MemberTaskEntity
             val memberNotes = allSessions.flatMap { it.notes }.filter { note ->
@@ -203,11 +185,10 @@ object BoardAnalyticsEngine {
             val rawDone = doneFromNotes + doneFromAi + doneFromRoom
             val rawPending = pendingFromNotes + pendingFromAi + pendingFromRoom
 
-            // Ensure every board member has at least baseline quarterly governance tasks for visual comparison
-            val baseCompleted = if (rawDone == 0 && rawPending == 0) (if (entity.isPresent) 3 else 1) else rawDone
-            val basePending = if (rawPending == 0 && rawDone == 0) 1 else rawPending
-            val totalMemberActions = max(1, baseCompleted + basePending)
-            val compRate = ((baseCompleted * 100f) / totalMemberActions).roundToInt().coerceIn(0, 100)
+            val totalMemberActions = rawDone + rawPending
+            val compRate = if (totalMemberActions == 0) 0 else {
+                ((rawDone * 100f) / totalMemberActions).roundToInt().coerceIn(0, 100)
+            }
 
             BoardMemberPerformance(
                 memberId = entity.id,
@@ -216,11 +197,11 @@ object BoardAnalyticsEngine {
                 department = entity.department.ifBlank { "حاکمیت شرکتی" },
                 currentStatus = entity.attendanceStatus,
                 isCurrentlyPresent = entity.isPresent,
-                sessionsPresent = combinedPresent,
-                sessionsTotal = combinedTotal,
+                sessionsPresent = presentSessions,
+                sessionsTotal = totalMemberSessions,
                 attendanceRatePercent = attRate,
-                completedActions = baseCompleted,
-                pendingActions = basePending,
+                completedActions = rawDone,
+                pendingActions = rawPending,
                 totalActions = totalMemberActions,
                 completionRatePercent = compRate
             )
@@ -230,7 +211,6 @@ object BoardAnalyticsEngine {
             memberPerformances
         } else {
             memberPerformances.filter { it.name.equals(selectedBoardMemberName, ignoreCase = true) }
-                .ifEmpty { memberPerformances }
         }
 
         val avgAttendance = if (allTrendPoints.isNotEmpty()) {
@@ -283,13 +263,15 @@ object BoardAnalyticsEngine {
         val scopedAttendees = if (selectedBoardMemberName.isNullOrBlank()) {
             attendees
         } else {
-            attendees.filter { it.name.equals(selectedBoardMemberName, ignoreCase = true) }.ifEmpty { attendees }
+            attendees.filter { it.name.equals(selectedBoardMemberName, ignoreCase = true) }
         }
 
-        val totalInvited = max(1, scopedAttendees.size)
+        val totalInvited = scopedAttendees.size
         val presentCount = scopedAttendees.count { it.isPresent }
         val absentCount = totalInvited - presentCount
-        val attendanceRate = ((presentCount * 100f) / totalInvited).roundToInt().coerceIn(0, 100)
+        val attendanceRate = if (totalInvited == 0) 0 else {
+            ((presentCount * 100f) / totalInvited).roundToInt().coerceIn(0, 100)
+        }
 
         val scopedNotes = if (selectedBoardMemberName.isNullOrBlank()) {
             session.notes
@@ -332,12 +314,14 @@ object BoardAnalyticsEngine {
         val scopedMembers = if (selectedBoardMemberName.isNullOrBlank()) {
             session.members
         } else {
-            session.members.filter { it.name.equals(selectedBoardMemberName, ignoreCase = true) }.ifEmpty { session.members }
+            session.members.filter { it.name.equals(selectedBoardMemberName, ignoreCase = true) }
         }
-        val totalInvited = max(1, scopedMembers.size)
+        val totalInvited = scopedMembers.size
         val presentCount = scopedMembers.count { it.isPresent }
         val absentCount = totalInvited - presentCount
-        val attendanceRate = ((presentCount * 100f) / totalInvited).roundToInt().coerceIn(0, 100)
+        val attendanceRate = if (totalInvited == 0) 0 else {
+            ((presentCount * 100f) / totalInvited).roundToInt().coerceIn(0, 100)
+        }
 
         val scopedNotes = if (selectedBoardMemberName.isNullOrBlank()) {
             session.notes
@@ -352,7 +336,7 @@ object BoardAnalyticsEngine {
         val pendingActions = totalActions - completedActions
         val completionRate = if (totalActions > 0) {
             ((completedActions * 100f) / totalActions).roundToInt().coerceIn(0, 100)
-        } else 75
+        } else 0
 
         return SessionTrendPoint(
             sessionId = session.id,
@@ -369,59 +353,6 @@ object BoardAnalyticsEngine {
         )
     }
 
-    private fun buildBaselineHistoricalPoints(
-        activeSession: MeetingSession,
-        effectiveAttendees: List<AttendeeEntity>,
-        existingHistoricalCount: Int,
-        selectedBoardMemberName: String?
-    ): List<SessionTrendPoint> {
-        val needed = (5 - existingHistoricalCount).coerceAtLeast(0)
-        if (needed == 0) return emptyList()
-
-        val totalMembers = max(1, effectiveAttendees.size)
-        val memberPresentNow = if (!selectedBoardMemberName.isNullOrBlank()) {
-            effectiveAttendees.find { it.name.equals(selectedBoardMemberName, ignoreCase = true) }?.isPresent ?: true
-        } else true
-
-        val templates = listOf(
-            Triple("۱۴۰۵/۰۶/۱۵", "جلسه کمیته حسابرسی و ریسک", Pair(0.75f, 0.68f)),
-            Triple("۱۴۰۵/۰۷/۰۲", "شورای راهبردی زنجیره سرد", Pair(0.82f, 0.74f)),
-            Triple("۱۴۰۵/۰۷/۱۸", "هیئت‌مدیره: بودجه ناوگان 5PL", Pair(0.88f, 0.80f)),
-            Triple("۱۴۰۵/۰۸/۰۱", "پایش KPI لجستیک و SLA", Pair(0.92f, 0.85f)),
-            Triple("۱۴۰۵/۰۸/۱۰", "کمیته حاکمیت شرکتی و انطباق", Pair(0.86f, 0.90f))
-        ).takeLast(needed)
-
-        return templates.mapIndexed { idx, (dateStr, title, rates) ->
-            val (attRatio, compRatio) = rates
-            val adjustedAttRatio = if (!selectedBoardMemberName.isNullOrBlank()) {
-                if (memberPresentNow || idx % 2 == 0) 1.0f else 0.0f
-            } else attRatio
-
-            val inv = if (!selectedBoardMemberName.isNullOrBlank()) 1 else totalMembers
-            val pres = (inv * adjustedAttRatio).roundToInt().coerceIn(0, inv)
-            val abs = inv - pres
-            val attPct = ((pres * 100f) / inv).roundToInt()
-
-            val totAct = if (!selectedBoardMemberName.isNullOrBlank()) 3 else (5 + idx)
-            val doneAct = (totAct * compRatio).roundToInt().coerceIn(0, totAct)
-            val pendAct = totAct - doneAct
-            val compPct = ((doneAct * 100f) / totAct).roundToInt()
-
-            SessionTrendPoint(
-                sessionId = "HIST-BASE-$idx-${activeSession.id.take(4)}",
-                periodLabel = dateStr.takeLast(5),
-                sessionTitle = title,
-                presentCount = pres,
-                absentCount = abs,
-                totalInvited = inv,
-                attendanceRatePercent = attPct,
-                completedActions = doneAct,
-                pendingActions = pendAct,
-                totalActions = totAct,
-                completionRatePercent = compPct
-            )
-        }
-    }
 }
 
 enum class RechartsChartTab(val title: String) {

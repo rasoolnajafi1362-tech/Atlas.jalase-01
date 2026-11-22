@@ -8,6 +8,7 @@ import com.example.data.*
 import com.example.viewmodel.*
 import com.example.util.*
 import com.example.service.*
+import okhttp3.ResponseBody.Companion.toResponseBody
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -1259,6 +1260,58 @@ class ExampleRobolectricTest {
     }
 
     @Test
+    fun `post recording analysis rejects service failure and preserves empty decisions`() {
+        kotlinx.coroutines.runBlocking {
+            val audio = kotlin.io.path.createTempFile(suffix = ".m4a").toFile()
+            try {
+                audio.writeBytes(byteArrayOf(1, 2, 3))
+                fun service(code: Int, payload: org.json.JSONObject): GeminiAiService {
+                    val envelope = org.json.JSONObject().put("candidates", org.json.JSONArray().put(
+                        org.json.JSONObject().put("content", org.json.JSONObject().put("parts",
+                            org.json.JSONArray().put(org.json.JSONObject().put("text", payload.toString()))
+                        ))
+                    ))
+                    return GeminiAiService(
+                        okhttp3.OkHttpClient.Builder().addInterceptor { chain ->
+                            okhttp3.Response.Builder()
+                                .request(chain.request())
+                                .protocol(okhttp3.Protocol.HTTP_1_1)
+                                .code(code)
+                                .message("fixture")
+                                .body(envelope.toString().toResponseBody())
+                                .build()
+                        }.build()
+                    )
+                }
+
+                val session = MeetingSession(title = "جلسهٔ آزمایشی")
+                val rejected = service(503, org.json.JSONObject())
+                    .generatePostRecordingExecutiveSummary(audio, session, customApiKey = "fixture")
+                assertTrue(rejected.isFailure)
+
+                val incomplete = service(200, org.json.JSONObject())
+                    .generatePostRecordingExecutiveSummary(audio, session, customApiKey = "fixture")
+                assertTrue(incomplete.isFailure)
+
+                val payload = org.json.JSONObject()
+                    .put("transcription", "متن آزمایشی")
+                    .put("executiveSummary", "خلاصهٔ آزمایشی")
+                    .put("keyDecisions", org.json.JSONArray())
+                    .put("actionItems", org.json.JSONArray())
+                val analysis = service(200, payload)
+                    .generatePostRecordingExecutiveSummary(audio, session, customApiKey = "fixture")
+                    .getOrThrow()
+                assertTrue(analysis.keyDecisions.isEmpty())
+                assertTrue(analysis.actionItems.isEmpty())
+                assertEquals("متن آزمایشی", analysis.fullTranscription)
+                assertArrayEquals(byteArrayOf(1, 2, 3), audio.readBytes())
+            } finally {
+                audio.delete()
+            }
+        }
+    }
+
+    @Test
     fun `test Room ExecutiveSummaryEntity, ExecutiveSummaryDao, and ExecutiveSummaryRepository persistence`() = kotlinx.coroutines.runBlocking {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val db = com.example.data.local.AtlasDatabase.createInMemory(context)
@@ -1274,18 +1327,14 @@ class ExampleRobolectricTest {
             audioFilePath = "/data/user/0/com.example/files/atlas_recordings/test_session.m4a",
             audioDurationSec = 185L
         )
-        val geminiService = GeminiAiService()
-        val analysisResult = geminiService.generatePostRecordingExecutiveSummary(
-            audioFile = null,
-            session = testSession,
-            durationSec = 185L,
-            customApiKey = ""
+        val analysis = AudioMeetingAnalysis(
+            fullTranscription = "سخنران: گزارش نمونه بررسی شد.",
+            executiveSummary = "خلاصهٔ آزمایشی برای آزمون ثبت در Room.",
+            keyDecisions = listOf("گزارش نمونه برای بازبینی ارسال شود."),
+            actionItems = emptyList(),
+            audioDurationSec = 185L,
+            audioFileName = "test_session.m4a"
         )
-        assertTrue(analysisResult.isSuccess)
-        val analysis = analysisResult.getOrNull()!!
-        assertTrue("Executive summary must not be blank", analysis.executiveSummary.isNotBlank())
-        assertTrue("Key decisions must be extracted", analysis.keyDecisions.isNotEmpty())
-        assertTrue("Action items must be extracted", analysis.actionItems.isNotEmpty())
 
         // Save to Room database
         val savedEntity = execSummaryRepo.saveExecutiveSummary(
@@ -1310,7 +1359,7 @@ class ExampleRobolectricTest {
 
     @Test
     @Config(shadows = [RecordingMediaRecorderShadow::class])
-    fun `test automatic Gemini executive summary generation and Room persistence immediately after stopping audio recording`() = kotlinx.coroutines.runBlocking {
+    fun `test missing Gemini configuration preserves recording without persisting a fabricated summary`() = kotlinx.coroutines.runBlocking {
         RecordingMediaRecorderShadow.resetRecordingShadow()
         shadowOf(ApplicationProvider.getApplicationContext<Application>())
             .grantPermissions(Manifest.permission.RECORD_AUDIO)
@@ -1332,24 +1381,17 @@ class ExampleRobolectricTest {
         // Wait for async post-recording coroutine to complete
         for (i in 0 until 60) {
             org.robolectric.shadows.ShadowLooper.idleMainLooper()
-            if (vm.lastPersistedRoomSummary.value != null && !vm.isAudioProcessingWithGemini.value) break
+            if (vm.audioProcessingError.value != null && !vm.isAudioProcessingWithGemini.value) break
             kotlinx.coroutines.delay(25)
         }
 
-        // Verify in-memory ViewModel state updated with Executive Summary & decisions
-        val analysis = vm.audioMeetingAnalysis.value
-        assertNotNull("AudioMeetingAnalysis must be automatically generated upon stopping recording", analysis)
-        assertTrue("Generated executiveSummary must not be blank", analysis!!.executiveSummary.isNotBlank())
-        assertTrue("Generated keyDecisions must not be empty", analysis.keyDecisions.isNotEmpty())
-        assertTrue("Active session aiSummary must be updated with Executive Summary", vm.activeSession.value.aiSummary.contains("خلاصه اجرایی"))
-
-        // Verify Room database persistence
-        val persistedInRoom = vm.getLatestSavedExecutiveSummaryOnce()
-        assertNotNull("ExecutiveSummaryEntity must be saved in Room database immediately after recording stops", persistedInRoom)
-        assertEquals(vm.activeSession.value.id, persistedInRoom!!.sessionId)
-        assertTrue("Entity must be flagged as auto-generated on stop", persistedInRoom.isAutoGeneratedOnStop)
-        assertEquals(analysis.executiveSummary, persistedInRoom.executiveSummary)
-        assertTrue("Room entity must contain key decisions", persistedInRoom.getKeyDecisionsList().isNotEmpty())
+        assertFalse(vm.isAudioProcessingWithGemini.value)
+        assertNotNull(vm.audioProcessingError.value)
+        assertNull(vm.audioMeetingAnalysis.value)
+        assertNull(vm.getLatestSavedExecutiveSummaryOnce())
+        val filePath = vm.activeSession.value.audioFilePath
+        assertFalse(filePath.isNullOrBlank())
+        assertTrue(java.io.File(requireNotNull(filePath)).length() > 0)
     }
 
     @Test

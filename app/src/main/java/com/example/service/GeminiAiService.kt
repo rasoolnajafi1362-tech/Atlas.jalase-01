@@ -39,12 +39,12 @@ data class GroundedSearchResult(
     val sources: List<GroundedSource> = emptyList()
 )
 
-class GeminiAiService {
-
-    private val client = OkHttpClient.Builder()
+class GeminiAiService(
+    private val client: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)
         .build()
+) {
 
     private fun resolveApiKey(customApiKey: String?): String {
         val buildConfigKey = try {
@@ -1666,9 +1666,17 @@ $archiveSummary
     ): Result<AudioMeetingAnalysis> = withContext(Dispatchers.IO) {
         val apiKey = resolveApiKey(customApiKey)
         if (apiKey.isBlank()) {
-            return@withContext Result.success(
-                generatePostRecordingSummaryFallback(session, audioFile, durationSec)
-            )
+            return@withContext Result.failure(IllegalStateException("پیکربندی Gemini کامل نیست. فایل صوتی برای تحلیل مجدد در جلسه محفوظ است."))
+        }
+
+        if (audioFile == null || !audioFile.isFile || audioFile.length() !in 1..(20 * 1024 * 1024)) {
+            return@withContext Result.failure(IllegalArgumentException("برای تحلیل ضبط، فایل صوتی معتبر و حداکثر ۲۰ مگابایت لازم است."))
+        }
+
+        val audioBytes = try {
+            audioFile.readBytes()
+        } catch (_: java.io.IOException) {
+            return@withContext Result.failure(IllegalStateException("خواندن فایل صوتی ممکن نشد."))
         }
 
         val membersList = session.members.joinToString(", ") { "${it.name} (${it.title} - ${it.unit})" }
@@ -1715,27 +1723,19 @@ $liveTranscriptionsContext
             val contents = JSONArray().apply {
                 val contentObj = JSONObject().apply {
                     val parts = JSONArray().apply {
-                        if (audioFile != null && audioFile.exists() && audioFile.length() in 1..(20 * 1024 * 1024)) {
-                            try {
-                                val audioBytes = audioFile.readBytes()
-                                val base64Data = android.util.Base64.encodeToString(audioBytes, android.util.Base64.NO_WRAP)
-                                val mimeType = when (audioFile.extension.lowercase()) {
-                                    "wav" -> "audio/wav"
-                                    "mp3" -> "audio/mp3"
-                                    "aac" -> "audio/aac"
-                                    "ogg" -> "audio/ogg"
-                                    else -> "audio/mp4"
-                                }
-                                put(
-                                    JSONObject().apply {
-                                        put("inline_data", JSONObject().apply {
-                                            put("mime_type", mimeType)
-                                            put("data", base64Data)
-                                        })
-                                    }
-                                )
-                            } catch (ignored: Exception) {}
+                        val mimeType = when (audioFile.extension.lowercase()) {
+                            "wav" -> "audio/wav"
+                            "mp3" -> "audio/mp3"
+                            "aac" -> "audio/aac"
+                            "ogg" -> "audio/ogg"
+                            else -> "audio/mp4"
                         }
+                        put(JSONObject().apply {
+                            put("inline_data", JSONObject().apply {
+                                put("mime_type", mimeType)
+                                put("data", android.util.Base64.encodeToString(audioBytes, android.util.Base64.NO_WRAP))
+                            })
+                        })
                         put(JSONObject().apply { put("text", prompt) })
                     }
                     put("parts", parts)
@@ -1753,12 +1753,11 @@ $liveTranscriptionsContext
         val request = Request.Builder().url(url).header("x-goog-api-key", apiKey).post(requestBody).build()
 
         try {
-            val response = client.newCall(request).execute()
-            val responseString = response.body?.string().orEmpty()
-            if (!response.isSuccessful) {
-                return@withContext Result.success(
-                    generatePostRecordingSummaryFallback(session, audioFile, durationSec)
-                )
+            val responseString = client.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    return@withContext Result.failure(IllegalStateException("سرویس Gemini پاسخ موفق نداد (${response.code})."))
+                }
+                response.body?.string().orEmpty()
             }
 
             val rootJson = JSONObject(responseString)
@@ -1771,9 +1770,7 @@ $liveTranscriptionsContext
                 .orEmpty()
 
             if (rawText.isBlank()) {
-                return@withContext Result.success(
-                    generatePostRecordingSummaryFallback(session, audioFile, durationSec)
-                )
+                return@withContext Result.failure(IllegalStateException("Gemini پاسخی برای تحلیل ضبط برنگرداند."))
             }
 
             val cleanJson = rawText
@@ -1783,16 +1780,17 @@ $liveTranscriptionsContext
                 .trim()
 
             val parsed = JSONObject(cleanJson)
-            val fallback = generatePostRecordingSummaryFallback(session, audioFile, durationSec)
-
-            val transcription = parsed.optString("transcription", "").ifBlank { fallback.fullTranscription }
-            val summary = parsed.optString("executiveSummary", "").ifBlank { fallback.executiveSummary }
+            val transcription = (parsed.opt("transcription") as? String).orEmpty().trim()
+            val summary = (parsed.opt("executiveSummary") as? String).orEmpty().trim()
+            if (transcription.isBlank() || summary.isBlank()) {
+                return@withContext Result.failure(IllegalStateException("پاسخ Gemini متن یا خلاصهٔ کامل ضبط را ندارد."))
+            }
 
             val decisionsList = mutableListOf<String>()
             val decisionsArray = parsed.optJSONArray("keyDecisions")
             if (decisionsArray != null) {
                 for (i in 0 until decisionsArray.length()) {
-                    val d = decisionsArray.optString(i, "").trim()
+                    val d = (decisionsArray.opt(i) as? String).orEmpty().trim()
                     if (d.isNotBlank()) decisionsList.add(d)
                 }
             }
@@ -1802,12 +1800,14 @@ $liveTranscriptionsContext
             if (actionsArray != null) {
                 for (i in 0 until actionsArray.length()) {
                     val item = actionsArray.optJSONObject(i) ?: continue
+                    val title = (item.opt("title") as? String).orEmpty().trim()
+                    if (title.isBlank()) continue
                     actionItemsList.add(
                         ExtractedActionItem(
-                            title = item.optString("title", "پیگیری مصوبات جلسه"),
-                            assignee = item.optString("assignee", "سخنران"),
-                            deadline = item.optString("deadline", "فوری / جاری"),
-                            priority = item.optString("priority", "فوری")
+                            title = title,
+                            assignee = (item.opt("assignee") as? String).orEmpty().trim(),
+                            deadline = (item.opt("deadline") as? String).orEmpty().trim(),
+                            priority = (item.opt("priority") as? String).orEmpty().trim()
                         )
                     )
                 }
@@ -1817,94 +1817,18 @@ $liveTranscriptionsContext
                 AudioMeetingAnalysis(
                     fullTranscription = transcription,
                     executiveSummary = summary,
-                    keyDecisions = if (decisionsList.isNotEmpty()) decisionsList else fallback.keyDecisions,
-                    actionItems = if (actionItemsList.isNotEmpty()) actionItemsList else fallback.actionItems,
+                    keyDecisions = decisionsList,
+                    actionItems = actionItemsList,
                     audioDurationSec = if (durationSec > 0) durationSec else session.audioDurationSec,
-                    audioFileName = audioFile?.name ?: "meeting_audio.m4a",
+                    audioFileName = audioFile.name,
                     timestamp = System.currentTimeMillis()
                 )
             )
-        } catch (e: Exception) {
-            Result.success(
-                generatePostRecordingSummaryFallback(session, audioFile, durationSec)
-            )
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            Result.failure(IllegalStateException("تحلیل ضبط با Gemini انجام نشد. دوباره تلاش کنید."))
         }
-    }
-
-    fun generatePostRecordingSummaryFallback(
-        session: MeetingSession,
-        audioFile: File?,
-        durationSec: Long = session.audioDurationSec
-    ): AudioMeetingAnalysis {
-        val cleanTitle = session.title.ifBlank { "جلسه راهبردی هیئت‌مدیره" }
-        val effectiveDuration = if (durationSec > 0) durationSec else maxOf(1L, session.audioDurationSec)
-        val presentMembers = session.members.filter { it.isPresent }.joinToString("، ") { "${it.name} (${it.title})" }
-            .ifBlank { "سخنران (مدیر عملیات)، مدیرعامل و اعضای هیئت‌مدیره" }
-
-        val liveTranscriptText = if (session.transcriptions.isNotEmpty()) {
-            session.transcriptions.joinToString("\n") { "[${it.timeFormatted}] ${it.speaker}: ${it.text}" }
-        } else {
-            "سخنران: شاخص‌های عملکردی جلسه «$cleanTitle» بررسی شد و تصمیمات اجرایی جهت ابلاغ به واحدهای عملیاتی به تصویب رسید."
-        }
-
-        val extractedDecisions = buildList {
-            session.notes.forEach { note ->
-                add("${note.type} (${note.speaker}): ${note.text}")
-            }
-            if (session.opsData.enabled) {
-                add("تثبیت پایداری زنجیره سرد (${session.opsData.coldChain}) و ارتقای بهره‌وری ناوگان به ${session.opsData.fleetEff}")
-            }
-            if (session.hrData.enabled && session.hrData.candidate.isNotBlank()) {
-                add("تصمیم کمیته جذب برای ${session.hrData.candidate}: ${session.hrData.decision}")
-            }
-            if (isEmpty()) {
-                add("تصویب چارچوب اجرایی و زمان‌بندی پیگیری مصوبات جلسه «$cleanTitle»")
-                add("الزام به ثبت گزارش پیشرفت هفتگی در سامانه اطلس جلسه ۰۱ تحت نظارت سخنران")
-            }
-        }
-
-        val extractedActions = if (session.notes.isNotEmpty()) {
-            session.notes.map { note ->
-                ExtractedActionItem(
-                    title = note.text,
-                    assignee = note.speaker.ifBlank { "سخنران" },
-                    deadline = note.due.ifBlank { "فوری / جاری" },
-                    priority = if (note.type.contains("مصوبه") || note.due.contains("فوری")) "فوری" else "بالا"
-                )
-            }
-        } else {
-            listOf(
-                ExtractedActionItem(
-                    title = "پیگیری و اجرای مصوبات کلیدی استخراج‌شده از صوت جلسه «$cleanTitle»",
-                    assignee = "سخنران",
-                    deadline = "تا پایان هفته جاری",
-                    priority = "فوری"
-                )
-            )
-        }
-
-        val summaryParagraph = buildString {
-            append("خلاصه اجرایی خودکار پس از پایان ضبط صوت (مدل Gemini 2.5 Flash):\n")
-            append("در جلسه «$cleanTitle» مورخ ${session.date} که با حضور $presentMembers به مدت $effectiveDuration ثانیه ضبط و مستندسازی گردید، ")
-            append("مباحث محوری پیرامون پایش اهداف عملیاتی، ارزیابی تعهدات و اتخاذ تصمیمات اجرایی بررسی شد. ")
-            if (session.opsData.enabled) {
-                append("در بخش لجستیک ۵PL، وضعیت زنجیره سرد (${session.opsData.coldChain}) و بودجه عملیاتی (${session.opsData.budget.ifBlank { "مصوب" }}) مورد تأیید قرار گرفت. ")
-            }
-            if (session.hrData.enabled && session.hrData.candidate.isNotBlank()) {
-                append("همچنین پرونده جذب «${session.hrData.candidate}» برای جایگاه «${session.hrData.position}» با نتیجه «${session.hrData.decision}» جمع‌بندی شد. ")
-            }
-            append("\nهم‌اکنون ${extractedDecisions.size} تصمیم کلیدی و ${extractedActions.size} تعهد اجرایی در دیتابیس Room ذخیره و نمایه گردید.")
-        }
-
-        return AudioMeetingAnalysis(
-            fullTranscription = liveTranscriptText,
-            executiveSummary = summaryParagraph,
-            keyDecisions = extractedDecisions,
-            actionItems = extractedActions,
-            audioDurationSec = effectiveDuration,
-            audioFileName = audioFile?.name ?: "meeting_audio_${session.id}.m4a",
-            timestamp = System.currentTimeMillis()
-        )
     }
 
     /**

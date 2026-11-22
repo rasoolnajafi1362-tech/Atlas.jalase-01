@@ -66,7 +66,16 @@ object QrCodeGenerator {
                 )
                 setHints(hints)
             }
-            reader.decodeWithState(binaryBitmap).text
+            try {
+                reader.decodeWithState(binaryBitmap).text
+            } catch (_: com.google.zxing.NotFoundException) {
+                // A generated, axis-aligned image can be sampled without finder detection.
+                reader.decode(binaryBitmap, mapOf(
+                    DecodeHintType.POSSIBLE_FORMATS to listOf(BarcodeFormat.QR_CODE),
+                    DecodeHintType.CHARACTER_SET to "UTF-8",
+                    DecodeHintType.PURE_BARCODE to true
+                )).text
+            }
         } catch (e: Exception) {
             null
         }

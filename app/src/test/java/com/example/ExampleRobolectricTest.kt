@@ -1,5 +1,7 @@
 package com.example
 
+import android.Manifest
+import android.app.Application
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import com.example.data.*
@@ -10,6 +12,7 @@ import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 
 @RunWith(RobolectricTestRunner::class)
@@ -451,7 +454,11 @@ class ExampleRobolectricTest {
     }
 
     @Test
+    @Config(shadows = [RecordingMediaRecorderShadow::class])
     fun `test AudioRecordManager recording lifecycle and amplitude tracking`() {
+        RecordingMediaRecorderShadow.resetRecordingShadow()
+        shadowOf(ApplicationProvider.getApplicationContext<Application>())
+            .grantPermissions(Manifest.permission.RECORD_AUDIO)
         val context = ApplicationProvider.getApplicationContext<Context>()
         val manager = AudioRecordManager(context)
 
@@ -798,7 +805,11 @@ class ExampleRobolectricTest {
     }
 
     @Test
+    @Config(shadows = [RecordingMediaRecorderShadow::class])
     fun `test 5-second silence detection auto-pauses recording and resumes when speech is detected`() {
+        RecordingMediaRecorderShadow.resetRecordingShadow()
+        shadowOf(ApplicationProvider.getApplicationContext<Application>())
+            .grantPermissions(Manifest.permission.RECORD_AUDIO)
         val context = ApplicationProvider.getApplicationContext<Context>()
         val manager = com.example.service.AudioRecordManager(context)
 
@@ -1291,7 +1302,11 @@ class ExampleRobolectricTest {
     }
 
     @Test
+    @Config(shadows = [RecordingMediaRecorderShadow::class])
     fun `test automatic Gemini executive summary generation and Room persistence immediately after stopping audio recording`() = kotlinx.coroutines.runBlocking {
+        RecordingMediaRecorderShadow.resetRecordingShadow()
+        shadowOf(ApplicationProvider.getApplicationContext<Application>())
+            .grantPermissions(Manifest.permission.RECORD_AUDIO)
         val app = ApplicationProvider.getApplicationContext<android.app.Application>()
         val vm = MeetingViewModel(app)
         vm.loadScenario("board_cold_chain")
@@ -1669,7 +1684,11 @@ class ExampleRobolectricTest {
     }
 
     @Test
+    @Config(shadows = [RecordingMediaRecorderShadow::class])
     fun `test Android audio recording and instant Speech-to-Text auto-typing into meeting minutes`() {
+        RecordingMediaRecorderShadow.resetRecordingShadow()
+        shadowOf(ApplicationProvider.getApplicationContext<Application>())
+            .grantPermissions(Manifest.permission.RECORD_AUDIO)
         val app = ApplicationProvider.getApplicationContext<android.app.Application>()
         val vm = MeetingViewModel(app)
         vm.loadScenario("board_cold_chain")

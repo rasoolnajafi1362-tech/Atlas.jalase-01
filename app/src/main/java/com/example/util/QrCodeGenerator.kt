@@ -27,7 +27,7 @@ object QrCodeGenerator {
             val hints = mapOf(
                 EncodeHintType.CHARACTER_SET to "UTF-8",
                 EncodeHintType.ERROR_CORRECTION to ErrorCorrectionLevel.M,
-                EncodeHintType.MARGIN to 1
+                EncodeHintType.MARGIN to 4
             )
             val bitMatrix = QRCodeWriter().encode(
                 content,
@@ -36,13 +36,12 @@ object QrCodeGenerator {
                 sizePx,
                 hints
             )
-            val bitmap = Bitmap.createBitmap(sizePx, sizePx, Bitmap.Config.ARGB_8888)
-            for (x in 0 until sizePx) {
-                for (y in 0 until sizePx) {
-                    bitmap.setPixel(x, y, if (bitMatrix[x, y]) darkColor else lightColor)
-                }
+            val width = bitMatrix.width
+            val height = bitMatrix.height
+            val pixels = IntArray(width * height) { index ->
+                if (bitMatrix[index % width, index / width]) darkColor else lightColor
             }
-            bitmap
+            Bitmap.createBitmap(pixels, width, height, Bitmap.Config.ARGB_8888)
         } catch (e: Exception) {
             null
         }

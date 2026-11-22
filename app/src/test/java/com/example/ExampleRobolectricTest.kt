@@ -122,6 +122,7 @@ class ExampleRobolectricTest {
     }
 
     @Test
+    @org.robolectric.annotation.GraphicsMode(org.robolectric.annotation.GraphicsMode.Mode.NATIVE)
     fun `test session qr code encode decode with zxing marks all members present`() {
         val app = ApplicationProvider.getApplicationContext<android.app.Application>()
         val vm = com.example.viewmodel.MeetingViewModel(app)
@@ -648,7 +649,12 @@ class ExampleRobolectricTest {
 
     @Test
     fun `test BoardAnalyticsEngine computes attendance trends and action completion over time`() {
-        val session = PredefinedScenarios.getScenario("board_cold_chain")
+        val fixture = PredefinedScenarios.getScenario("board_cold_chain")
+        val session = fixture.copy(
+            members = fixture.members.mapIndexed { index, member ->
+                member.copy(name = "عضو آزمایشی ${index + 1}")
+            }
+        )
         val roomAttendees = session.members.mapIndexed { idx, m ->
             com.example.data.local.AttendeeEntity.fromMember(m, session.id, idx)
         }
@@ -669,7 +675,7 @@ class ExampleRobolectricTest {
 
         // Board members performance list should match roomAttendees
         assertEquals(roomAttendees.size, analytics.boardMembers.size)
-        assertTrue(analytics.boardMembers.any { it.name.contains("سخنران") })
+        assertEquals(session.members.map { it.name }, analytics.boardMembers.map { it.name })
 
         // Filter by specific board member
         val selected = roomAttendees.first()

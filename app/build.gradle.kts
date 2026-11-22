@@ -67,6 +67,10 @@ android {
     unitTests {
       isIncludeAndroidResources = true
       all {
+        it.testLogging {
+          events("failed")
+          exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+        }
         it.systemProperty(
           "robolectric.dependency.repo.url",
           "https://maven-central.storage-download.googleapis.com/maven2/"

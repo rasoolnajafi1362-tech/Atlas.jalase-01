@@ -1359,39 +1359,40 @@ class ExampleRobolectricTest {
 
     @Test
     @Config(shadows = [RecordingMediaRecorderShadow::class])
-    fun `test missing Gemini configuration preserves recording without persisting a fabricated summary`() = kotlinx.coroutines.runBlocking {
+    fun `failed Gemini analysis after stopping preserves recording and does not persist summary`() = kotlinx.coroutines.runBlocking {
         RecordingMediaRecorderShadow.resetRecordingShadow()
-        shadowOf(ApplicationProvider.getApplicationContext<Application>())
-            .grantPermissions(Manifest.permission.RECORD_AUDIO)
-        val app = ApplicationProvider.getApplicationContext<android.app.Application>()
-        val vm = MeetingViewModel(app)
-        vm.loadScenario("board_cold_chain")
+        val app = ApplicationProvider.getApplicationContext<Application>()
+        shadowOf(app).grantPermissions(Manifest.permission.RECORD_AUDIO)
+        val requestSeen = java.util.concurrent.atomic.AtomicBoolean(false)
+        val client = okhttp3.OkHttpClient.Builder().addInterceptor {
+            requestSeen.set(true)
+            throw java.io.IOException("offline fixture")
+        }.build()
+        val vm = MeetingViewModel(app, GeminiAiService(client))
+        vm.startNewBlankSession()
+        vm.setGeminiApiKey("fixture")
 
-        assertTrue("Auto-summarize on recording stop should be enabled by default", vm.autoSummarizeOnRecordingStop.value)
-        assertFalse(vm.isAudioRecording.value)
-
-        // 1. Start audio recording
         vm.toggleAudioRecording()
-        assertTrue("Recording should now be active", vm.isAudioRecording.value)
-
-        // 2. Stop audio recording -> must immediately trigger Gemini Executive Summary generation & Room persistence
+        assertTrue("Recording starts", vm.isAudioRecording.value)
         vm.toggleAudioRecording()
-        assertFalse("Recording should now be stopped", vm.isAudioRecording.value)
+        assertFalse("Recording stops", vm.isAudioRecording.value)
+        val filePath = vm.activeSession.value.audioFilePath
+        assertFalse("Recording is linked to the active session", filePath.isNullOrBlank())
+        val audio = java.io.File(requireNotNull(filePath))
+        assertTrue("Saved recording is readable", audio.length() > 0)
 
-        // Wait for async post-recording coroutine to complete
-        for (i in 0 until 60) {
-            org.robolectric.shadows.ShadowLooper.idleMainLooper()
-            if (vm.audioProcessingError.value != null && !vm.isAudioProcessingWithGemini.value) break
-            kotlinx.coroutines.delay(25)
+        kotlinx.coroutines.withTimeout(10_000) {
+            while (vm.audioProcessingError.value == null || vm.isAudioProcessingWithGemini.value) {
+                org.robolectric.shadows.ShadowLooper.idleMainLooper()
+                kotlinx.coroutines.delay(25)
+            }
         }
 
-        assertFalse(vm.isAudioProcessingWithGemini.value)
-        assertNotNull(vm.audioProcessingError.value)
-        assertNull(vm.audioMeetingAnalysis.value)
-        assertNull(vm.getLatestSavedExecutiveSummaryOnce())
-        val filePath = vm.activeSession.value.audioFilePath
-        assertFalse(filePath.isNullOrBlank())
-        assertTrue(java.io.File(requireNotNull(filePath)).length() > 0)
+        assertTrue("The controlled service received the recording", requestSeen.get())
+        assertNull("No fabricated analysis shown", vm.audioMeetingAnalysis.value)
+        assertNull("No fabricated summary persisted", vm.getLatestSavedExecutiveSummaryOnce())
+        assertEquals(filePath, vm.activeSession.value.audioFilePath)
+        assertTrue("Recording survives failed analysis", audio.length() > 0)
     }
 
     @Test

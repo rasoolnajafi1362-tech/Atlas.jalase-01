@@ -39,7 +39,12 @@ import java.io.File
 import java.util.Locale
 import java.util.UUID
 
-class MeetingViewModel(application: Application) : AndroidViewModel(application) {
+class MeetingViewModel internal constructor(
+    application: Application,
+    private val geminiService: GeminiAiService
+) : AndroidViewModel(application) {
+
+    constructor(application: Application) : this(application, GeminiAiService())
 
     private val repository = MeetingRepository(application)
     private val database = AtlasDatabase.getInstance(application)
@@ -54,7 +59,6 @@ class MeetingViewModel(application: Application) : AndroidViewModel(application)
         scheduleDao = database.boardScheduleDao(),
         minutesSearchRepository = minutesSearchRepository
     )
-    private val geminiService = GeminiAiService()
     private val audioRecordManager = AudioRecordManager(application)
     private val mainHandler = Handler(Looper.getMainLooper())
 

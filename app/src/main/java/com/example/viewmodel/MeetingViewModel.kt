@@ -2465,15 +2465,20 @@ class MeetingViewModel internal constructor(
                 customApiKey = apiKey
             )
 
+            val latest = activeSession.value
+            if (latest.id != current.id || latest.audioFilePath != current.audioFilePath) {
+                _isAnalyzingSentiment.value = false
+                return@launch
+            }
             result.onSuccess { sentiment ->
                 _audioSentimentAnalysis.value = sentiment
                 _isAnalyzingSentiment.value = false
 
                 // Update active session with the sentiment evaluation
-                val updatedAudioAnalysis = current.latestAudioAnalysis?.copy(
+                val updatedAudioAnalysis = latest.latestAudioAnalysis?.copy(
                     sentimentAnalysis = sentiment
                 )
-                val updatedSession = current.copy(
+                val updatedSession = latest.copy(
                     audioSentimentAnalysis = sentiment,
                     latestAudioAnalysis = updatedAudioAnalysis
                 )
@@ -2585,8 +2590,13 @@ class MeetingViewModel internal constructor(
                 customApiKey = apiKey
             )
 
+            if (activeSession.value.id != current.id) {
+                _isExtractingMemberTasks.value = false
+                return@launch
+            }
             result.onSuccess { extractedTasks ->
-                val persisted = if (_autoSyncExtractedTasksToDbAndCalendar.value) {
+                val autoSync = _autoSyncExtractedTasksToDbAndCalendar.value
+                val persisted = if (autoSync) {
                     memberTaskRepository.saveExtractedMemberTasks(
                         sessionId = current.id,
                         tasks = extractedTasks
@@ -2594,23 +2604,29 @@ class MeetingViewModel internal constructor(
                 } else {
                     extractedTasks
                 }
-                _lastExtractedMemberTasks.value = persisted
                 _isExtractingMemberTasks.value = false
 
+                val latest = activeSession.value
+                if (latest.id != current.id) return@onSuccess
+                _lastExtractedMemberTasks.value = persisted
+                if (!autoSync) {
+                    _userMessage.value = "تعداد پیشنهادهای وظیفه: ${persisted.size}"
+                    return@onSuccess
+                }
                 // Also synchronize newly discovered action items into active session notes if not already present
-                val existingTexts = current.notes.map { it.text.trim() }.toSet()
+                val existingTexts = latest.notes.map { it.text.trim() }.toSet()
                 val newNotesFromTasks = persisted.filter { it.taskTitle.trim() !in existingTexts }.map { task ->
                     MeetingNote(
-                        timeFormatted = formatClock(current.elapsedSeconds),
+                        timeFormatted = formatClock(latest.elapsedSeconds),
                         speaker = task.assigneeName,
                         text = task.taskTitle,
                         type = if (task.priority == "فوری") "🚨 مصوبه رسمی" else "📌 تعهد اجرایی",
-                        due = "${task.deadlineLabel} (${task.calendarDate})",
+                        due = listOf(task.deadlineLabel, task.calendarDate).filter { it.isNotBlank() }.distinct().joinToString(" · "),
                         isDone = task.isDone
                     )
                 }
                 if (newNotesFromTasks.isNotEmpty()) {
-                    save(current.copy(notes = current.notes + newNotesFromTasks))
+                    save(latest.copy(notes = latest.notes + newNotesFromTasks))
                 }
 
                 val distinctAssignees = persisted.map { it.assigneeName }.distinct().size

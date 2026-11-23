@@ -20,6 +20,53 @@ import org.robolectric.annotation.Config
 @Config(sdk = [36])
 class ExampleRobolectricTest {
 
+    private fun fixtureGemini(payload: org.json.JSONObject, code: Int = 200): GeminiAiService {
+        val part = org.json.JSONObject().put("text", payload.toString())
+        val content = org.json.JSONObject().put("parts", org.json.JSONArray().put(part))
+        val candidate = org.json.JSONObject().put("content", content)
+        val envelope = org.json.JSONObject().put("candidates", org.json.JSONArray().put(candidate))
+        return GeminiAiService(okhttp3.OkHttpClient.Builder().addInterceptor { chain ->
+            okhttp3.Response.Builder()
+                .request(chain.request()).protocol(okhttp3.Protocol.HTTP_1_1)
+                .code(code).message("fixture").body(envelope.toString().toResponseBody()).build()
+        }.build())
+    }
+
+    private fun sentimentFixture() = org.json.JSONObject("""{
+        "overallTone":"آرام","harmonyScore":82,"tensionScore":18,
+        "constructivePercentage":65,"neutralPercentage":20,"tensionPercentage":15,
+        "dominantEmotion":"تمرکز","summaryEvaluation":"نمونه آزمون",
+        "flaggedSegments":[{"timestampRange":"00:00 - 00:05","speaker":"عضو آزمون",
+        "tensionLevel":"متوسط","triggerTopic":"مهلت","quoteExcerpt":"مهلت را بررسی کنیم",
+        "reviewRecommendation":"بازبینی مهلت"}]
+    }""")
+
+    private fun taskFixture(quote: String): org.json.JSONObject {
+        val task = org.json.JSONObject().put("assigneeName", "سخنران")
+            .put("taskTitle", "نهایی‌سازی گزارش").put("calendarDate", "1405/08/20")
+            .put("deadlineLabel", "1405/08/20").put("sourceQuote", quote)
+        return org.json.JSONObject().put("tasks", org.json.JSONArray().put(task))
+    }
+
+    @Test
+    fun `Gemini failures do not turn into fabricated sentiment or tasks`() = kotlinx.coroutines.runBlocking {
+        val session = MeetingSession(title = "جلسهٔ آزمون")
+        val requestText = "گزارش را بررسی کنید."
+        val error = fixtureGemini(org.json.JSONObject(), 503)
+        assertTrue(error.analyzeAudioSentimentAndTension(null, session, "fixture").isFailure)
+        assertTrue(error.extractAssigneesAndActionItemsFromMeetingText(session, requestText, "fixture").isFailure)
+
+        val incomplete = fixtureGemini(org.json.JSONObject())
+        assertTrue(incomplete.analyzeAudioSentimentAndTension(null, session, "fixture").isFailure)
+        assertTrue(incomplete.extractAssigneesAndActionItemsFromMeetingText(session, requestText, "fixture").isFailure)
+
+        val empty = fixtureGemini(org.json.JSONObject().put("tasks", org.json.JSONArray()))
+        assertTrue(empty.extractAssigneesAndActionItemsFromMeetingText(session, requestText, "fixture").getOrThrow().isEmpty())
+        val ungrounded = fixtureGemini(taskFixture("عبارتی که در جلسه نیست"))
+        assertTrue(ungrounded.extractAssigneesAndActionItemsFromMeetingText(session, requestText, "fixture").getOrThrow().isEmpty())
+    }
+
+
     @Test
     fun `read string from context matches atlas app name`() {
         val context = ApplicationProvider.getApplicationContext<Context>()
@@ -1097,14 +1144,14 @@ class ExampleRobolectricTest {
     }
 
     @Test
-    fun `test audio sentiment analysis and high tension segment detection with Gemini fallback`() = kotlinx.coroutines.runBlocking {
-        val geminiService = GeminiAiService()
+    fun `test audio sentiment analysis and high tension segment detection with a controlled Gemini response`() = kotlinx.coroutines.runBlocking {
+        val geminiService = fixtureGemini(sentimentFixture())
         val testSession = PredefinedScenarios.getScenario("board_cold_chain")
 
         val result = geminiService.analyzeAudioSentimentAndTension(
             audioFile = null,
             session = testSession,
-            customApiKey = ""
+            customApiKey = "fixture"
         )
         assertTrue(result.isSuccess)
         val sentiment = result.getOrNull()
@@ -1129,7 +1176,8 @@ class ExampleRobolectricTest {
     @Test
     fun `test audio sentiment viewmodel integration, toggle reviewed, and add resolution to meeting notes`() = kotlinx.coroutines.runBlocking {
         val app = ApplicationProvider.getApplicationContext<android.app.Application>()
-        val vm = MeetingViewModel(app)
+        val vm = MeetingViewModel(app, fixtureGemini(sentimentFixture()))
+        vm.setGeminiApiKey("fixture")
         vm.loadScenario("board_cold_chain")
 
         // Trigger sentiment analysis
@@ -1411,15 +1459,15 @@ class ExampleRobolectricTest {
             مدیر مالی موظف شد متمم بودجه پالت‌های استاندارد را تا فردا به هیئت‌مدیره ارسال کند.
         """.trimIndent()
 
-        val geminiService = GeminiAiService()
+        val geminiService = fixtureGemini(taskFixture(rawMeetingText.lineSequence().first()))
         val extractionResult = geminiService.extractAssigneesAndActionItemsFromMeetingText(
             session = testSession,
             customMeetingText = rawMeetingText,
-            customApiKey = ""
+            customApiKey = "fixture"
         )
         assertTrue(extractionResult.isSuccess)
         val extractedTasks = extractionResult.getOrNull()!!
-        assertTrue("Must extract multiple tasks from meeting text and notes", extractedTasks.size >= 2)
+        assertEquals(1, extractedTasks.size)
 
         // Verify assignees and normalized calendar dates
         assertTrue("Atlas Team must be identified as a responsible assignee", extractedTasks.any { it.assigneeName.contains("سخنران") })
@@ -1449,10 +1497,10 @@ class ExampleRobolectricTest {
     @Test
     fun `test ViewModel extractAndAutoAssignMemberTasksWithGemini automatically adds tasks to Room database and calendar`() = kotlinx.coroutines.runBlocking {
         val app = ApplicationProvider.getApplicationContext<android.app.Application>()
-        val vm = MeetingViewModel(app)
-        vm.loadScenario("board_cold_chain")
-
         val customText = "مقرر شد سخنران تا 1405/08/20 مستندات ممیزی زنجیره سرد را نهایی کند."
+        val vm = MeetingViewModel(app, fixtureGemini(taskFixture(customText)))
+        vm.startNewBlankSession()
+        vm.setGeminiApiKey("fixture")
         vm.extractAndAutoAssignMemberTasksWithGemini(customText)
 
         for (i in 0 until 60) {

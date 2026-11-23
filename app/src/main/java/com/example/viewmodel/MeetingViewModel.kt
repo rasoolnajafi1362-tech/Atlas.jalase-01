@@ -122,9 +122,6 @@ class MeetingViewModel internal constructor(
     private val _memberTaskExtractionError = MutableStateFlow<String?>(null)
     val memberTaskExtractionError: StateFlow<String?> = _memberTaskExtractionError.asStateFlow()
 
-    private val _lastExtractedMemberTasks = MutableStateFlow<List<MemberTaskEntity>>(emptyList())
-    val lastExtractedMemberTasks: StateFlow<List<MemberTaskEntity>> = _lastExtractedMemberTasks.asStateFlow()
-
     private val _pendingMemberTasks = MutableStateFlow<List<MemberTaskEntity>>(emptyList())
     val pendingMemberTasks: StateFlow<List<MemberTaskEntity>> = _pendingMemberTasks.asStateFlow()
     private val _isSavingApprovedTask = MutableStateFlow(false)
@@ -1483,6 +1480,11 @@ class MeetingViewModel internal constructor(
                 customApiKey = apiKey
             )
 
+            val latestSession = activeSession.value
+            if (latestSession.id != current.id) {
+                _isAnalyzingTypedMinutes.value = false
+                return@launch
+            }
             result.onSuccess { analysis ->
                 _typedMinutesAnalysis.value = analysis
                 _isAnalyzingTypedMinutes.value = false
@@ -1491,7 +1493,7 @@ class MeetingViewModel internal constructor(
                     _liveTypedMinutesBuffer.value = analysis.sourceTypedText
                 }
 
-                // Map per-person tasks to ExtractedActionItem & Room MemberTaskEntity
+                // Keep generated action items available for explicit review.
                 val actionItems = analysis.assignedTasksByPerson.map { pt ->
                     ExtractedActionItem(
                         id = pt.id,
@@ -1499,48 +1501,9 @@ class MeetingViewModel internal constructor(
                         assignee = pt.personName,
                         deadline = pt.deadline,
                         priority = pt.priority,
-                        isAddedToNotes = true
+                        isAddedToNotes = false
                     )
                 }
-
-                val roomTasks = analysis.assignedTasksByPerson.mapIndexed { idx, pt ->
-                    MemberTaskEntity(
-                        sessionId = current.id,
-                        sessionTitle = current.title.ifBlank { "جلسه راهبردی هیئت‌مدیره" },
-                        assigneeName = pt.personName,
-                        assigneeRole = pt.personRole,
-                        taskTitle = pt.taskTitle,
-                        taskDescription = "استخراج خودکار با Gemini از متن تایپ‌شده جلسه «${current.title.ifBlank { "سازمانی" }}»",
-                        deadlineLabel = pt.deadline,
-                        calendarDate = geminiService.normalizeCalendarDateFromDeadline(current.date, pt.deadline, idx),
-                        priority = pt.priority,
-                        status = "IN_PROGRESS",
-                        isDone = false,
-                        isAddedToCalendar = true,
-                        isAddedToMemberTaskList = true,
-                        sourceQuote = pt.sourceExcerpt.ifBlank { pt.taskTitle }
-                    )
-                }
-
-                if (roomTasks.isNotEmpty()) {
-                    val savedTasks = memberTaskRepository.saveExtractedMemberTasks(current.id, roomTasks)
-                    _lastExtractedMemberTasks.value = savedTasks
-                }
-
-                val latestSession = activeSession.value
-                val existingNoteTexts = latestSession.notes.map { it.text.trim() }.toSet()
-                val newNotesFromTasks = analysis.assignedTasksByPerson
-                    .filter { it.taskTitle.trim() !in existingNoteTexts }
-                    .map { pt ->
-                        MeetingNote(
-                            timeFormatted = formatCurrentElapsed(),
-                            speaker = pt.personName,
-                            text = pt.taskTitle,
-                            type = if (pt.priority == "فوری") "🚨 مصوبه رسمی" else "📌 تعهد اجرایی",
-                            due = pt.deadline,
-                            isDone = false
-                        )
-                    }
 
                 val transAnalysis = TranscriptionAiAnalysis(
                     executiveSummary = analysis.formalMinutesText,
@@ -1553,14 +1516,13 @@ class MeetingViewModel internal constructor(
                 val updatedSession = latestSession.copy(
                     typedMinutesAnalysis = analysis,
                     transcriptionAnalysis = transAnalysis,
-                    aiSummary = analysis.formalMinutesText.ifBlank { latestSession.aiSummary },
-                    notes = newNotesFromTasks + latestSession.notes
+                    aiSummary = analysis.formalMinutesText.ifBlank { latestSession.aiSummary }
                 )
                 save(updatedSession)
 
                 val distinctPersons = analysis.assignedTasksByPerson.map { it.personName }.distinct().size
                 if (!isAutoTriggered) {
-                    _userMessage.value = "✨ متن تایپ‌شده با Gemini تحلیل شد: صورت‌جلسه رسمی، ${analysis.decisionsMade.size} تصمیم و ${analysis.assignedTasksByPerson.size} وظیفه برای $distinctPersons شخص استخراج گردید."
+                    _userMessage.value = "✨ متن تایپ‌شده با Gemini تحلیل شد: پیش‌نویس صورت‌جلسه، ${analysis.decisionsMade.size} تصمیم و ${analysis.assignedTasksByPerson.size} وظیفه برای $distinctPersons شخص استخراج گردید."
                 }
             }.onFailure { err ->
                 _isAnalyzingTypedMinutes.value = false
@@ -2389,29 +2351,8 @@ class MeetingViewModel internal constructor(
 
     fun sendAllRoomTaskDeadlineReminders(context: Context, assigneeFilter: String? = null) {
         viewModelScope.launch {
-            var pendingTasks = memberTaskRepository.getPendingDeadlineTasksOnce()
-            if (pendingTasks.isEmpty()) {
-                val current = activeSession.value
-                val fallbackTasks = current.notes.filter { !it.isDone }.mapIndexed { idx, note ->
-                    MemberTaskEntity(
-                        id = idx + 1,
-                        sessionId = current.id,
-                        sessionTitle = current.title,
-                        assigneeName = note.speaker.ifBlank { "عضو مسئول هیئت‌مدیره" },
-                        assigneeRole = "عضو هیئت‌مدیره",
-                        taskTitle = note.text,
-                        deadlineLabel = note.due.ifBlank { "فوری / پایان هفته" },
-                        calendarDate = current.date.ifBlank { "۱۴۰۵/۰۸/۲۰" },
-                        priority = if (note.type.contains("مصوبه")) "فوری" else "بالا",
-                        status = "IN_PROGRESS",
-                        isDone = false,
-                        isAddedToCalendar = true
-                    )
-                }
-                if (fallbackTasks.isNotEmpty()) {
-                    pendingTasks = memberTaskRepository.saveExtractedMemberTasks(current.id, fallbackTasks)
-                }
-            }
+            val pendingTasks = memberTaskRepository.getPendingDeadlineTasksOnce()
+                .filter { it.isAddedToCalendar && it.calendarDate.isNotBlank() }
             val sentCount = MeetingNotificationHelper.sendAllUpcomingRoomTaskDeadlineReminders(
                 context = context,
                 tasks = pendingTasks,
@@ -2623,9 +2564,6 @@ class MeetingViewModel internal constructor(
     fun toggleMemberTaskDone(task: MemberTaskEntity) {
         viewModelScope.launch {
             val updated = memberTaskRepository.toggleTaskDone(task)
-            _lastExtractedMemberTasks.value = _lastExtractedMemberTasks.value.map {
-                if (it.id == updated.id || (it.taskTitle == updated.taskTitle && it.assigneeName == updated.assigneeName)) updated else it
-            }
             val statusLabel = if (updated.isDone) "تکمیل‌شده" else "در حال انجام"
             _userMessage.value = "وضعیت وظیفه «${updated.assigneeName}» در دیتابیس Room به «$statusLabel» تغییر یافت."
         }
@@ -2634,7 +2572,6 @@ class MeetingViewModel internal constructor(
     fun deleteMemberTask(taskId: Int) {
         viewModelScope.launch {
             memberTaskRepository.deleteTaskById(taskId)
-            _lastExtractedMemberTasks.value = _lastExtractedMemberTasks.value.filterNot { it.id == taskId }
             _userMessage.value = "وظیفه از کارتابل دیتابیس Room حذف شد."
         }
     }

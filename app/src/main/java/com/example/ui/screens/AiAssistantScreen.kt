@@ -186,7 +186,7 @@ fun AiAssistantScreen(
                 modifier = Modifier.testTag("ai_typed_minutes_analyzer_panel")
             ) {
                 Text(
-                    text = "متن تایپ‌شده از جلسات (تایپ صوتی Speech-to-Text یا یادداشت دستی) به صورت خودکار توسط Gemini API واکاوی شده و ۱) متن رسمی صورت‌جلسه، ۲) تصمیمات اتخاذ شده و ۳) وظایف محول شده به هر شخص استخراج و در دیتابیس Room ثبت می‌گردد.",
+                    text = "Gemini از متن جلسه پیش‌نویس صورت‌جلسه، تصمیم‌ها و وظایف پیشنهادی تهیه می‌کند. وظایف پس از بازبینی قابل ثبت‌اند.",
                     color = TextSub,
                     fontSize = 11.sp,
                     lineHeight = 17.sp
@@ -265,7 +265,7 @@ fun AiAssistantScreen(
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         Text(
-                            text = "📄 ۱. صورت‌جلسه رسمی استخراج‌شده:",
+                            text = "پیش‌نویس صورت‌جلسه",
                             color = AccentCyan,
                             fontSize = 11.sp,
                             fontWeight = FontWeight.ExtraBold
@@ -605,7 +605,11 @@ fun AiAssistantScreen(
                                                     .padding(horizontal = 6.dp, vertical = 2.dp)
                                             ) {
                                                 Text(
-                                                    text = if (task.isDone) "✅ تکمیل‌شده" else "📌 ثبت در تقویم و کارتابل",
+                                                    text = when {
+                                        task.isDone -> "تکمیل‌شده"
+                                        task.isAddedToCalendar -> "ثبت در تقویم و کارتابل"
+                                        else -> "ثبت در کارتابل"
+                                    },
                                                     color = AccentEmeraldLight,
                                                     fontSize = 9.sp,
                                                     fontWeight = FontWeight.Bold

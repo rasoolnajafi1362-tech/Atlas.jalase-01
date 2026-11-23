@@ -1851,6 +1851,7 @@ class ExampleRobolectricTest {
         val app = ApplicationProvider.getApplicationContext<android.app.Application>()
         val vm = MeetingViewModel(app)
         vm.loadScenario("board_cold_chain")
+        val initialTaskIds = vm.getMemberTasksForSessionFromRoomOnce().map { it.id }
 
         val sampleTypedMeetingText = """
             [00:02:15] سخنران: مصوب شد سامانه پایش برخط دمای ناوگان زنجیره سرد با مسئولیت سخنران تا پایان هفته عملیاتی گردد.
@@ -1907,12 +1908,9 @@ class ExampleRobolectricTest {
             analysis.assignedTasksByPerson.any { it.personName.contains("سخنران") && it.taskTitle.contains("ممیزی") }
         )
 
-        // 4. Verify per-person tasks are persisted in Room member_tasks table
-        val roomTasks = vm.getMemberTasksForSessionFromRoomOnce()
-        assertTrue(
-            "Extracted per-person tasks must be persisted in Room member_tasks table",
-            roomTasks.any { it.assigneeName.contains("سخنران") }
-        )
+        assertEquals(initialTaskIds, vm.getMemberTasksForSessionFromRoomOnce().map { it.id })
+        assertTrue("Draft tasks are not marked as recorded",
+            vm.activeSession.value.transcriptionAnalysis!!.actionItems.none { it.isAddedToNotes })
     }
 
     @Test

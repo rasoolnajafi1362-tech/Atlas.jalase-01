@@ -1,0 +1,31 @@
+name: Android verification
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  debug-and-unit-tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Select JDK 21 and install Android SDK
+        run: |
+          echo "JAVA_HOME=$JAVA_HOME_21_X64" >> "$GITHUB_ENV"
+          echo "$JAVA_HOME_21_X64/bin" >> "$GITHUB_PATH"
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36.1" "build-tools;36.0.0"
+      - name: Install verified Gradle 9.3.1
+        run: |
+          zip="$RUNNER_TEMP/gradle-9.3.1-bin.zip"
+          curl --fail --silent --show-error --location --retry 3 https://services.gradle.org/distributions/gradle-9.3.1-bin.zip -o "$zip"
+          printf '%s  %s\n' b266d5ff6b90eada6dc3b20cb090e3731302e553a27c5d3e4df1f0d76beaff06 "$zip" | sha256sum --check
+          unzip -q "$zip" -d "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/gradle-9.3.1/bin" >> "$GITHUB_PATH"
+      - name: Create disposable debug signing key
+        run: keytool -genkeypair -keystore debug.keystore -storepass android -keypass android -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 30 -dname CN=Atlas-Android-CI -noprompt
+      - name: Build debug APK and run JVM tests
+        run: gradle --no-daemon --max-workers=2 --continue :app:assembleDebug :app:testDebugUnitTest

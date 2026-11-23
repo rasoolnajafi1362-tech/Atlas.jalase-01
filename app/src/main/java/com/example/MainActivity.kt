@@ -114,10 +114,10 @@ fun AtlasMainScreen(viewModel: MeetingViewModel = viewModel()) {
     val dateRangeEndFilter by viewModel.dateRangeEndFilter.collectAsStateWithLifecycle()
     val allRoomExecutiveSummaries by viewModel.allRoomExecutiveSummaries.collectAsStateWithLifecycle()
     val activeSessionMemberTasks by viewModel.activeSessionMemberTasks.collectAsStateWithLifecycle()
-    val lastExtractedMemberTasks by viewModel.lastExtractedMemberTasks.collectAsStateWithLifecycle()
     val isExtractingMemberTasks by viewModel.isExtractingMemberTasks.collectAsStateWithLifecycle()
     val memberTaskExtractionError by viewModel.memberTaskExtractionError.collectAsStateWithLifecycle()
-    val autoSyncExtractedTasksToDbAndCalendar by viewModel.autoSyncExtractedTasksToDbAndCalendar.collectAsStateWithLifecycle()
+    val pendingMemberTasks by viewModel.pendingMemberTasks.collectAsStateWithLifecycle()
+    val isSavingApprovedTask by viewModel.isSavingApprovedTask.collectAsStateWithLifecycle()
     val isGeneratingMinutesDraft by viewModel.isGeneratingMinutesDraft.collectAsStateWithLifecycle()
     val minutesDraftError by viewModel.minutesDraftError.collectAsStateWithLifecycle()
     val officialMinutesDraft by viewModel.officialMinutesDraft.collectAsStateWithLifecycle()
@@ -434,14 +434,14 @@ fun AtlasMainScreen(viewModel: MeetingViewModel = viewModel()) {
                         onToggleSegmentReviewed = { id, notes -> viewModel.toggleFlaggedSegmentReviewed(id, notes) },
                         onAddResolutionFromSegment = { viewModel.applyFlaggedSegmentToMeetingNotes(it) },
                         onClearSentimentAnalysis = { viewModel.clearSentimentAnalysis() },
-                        extractedMemberTasks = activeSessionMemberTasks.ifEmpty { lastExtractedMemberTasks },
+                        extractedMemberTasks = activeSessionMemberTasks.filter { it.sessionId == activeSession.id },
                         isExtractingMemberTasks = isExtractingMemberTasks,
                         memberTaskExtractionError = memberTaskExtractionError,
-                        autoSyncExtractedTasksToDbAndCalendar = autoSyncExtractedTasksToDbAndCalendar,
-                        onAutoSyncExtractedTasksChange = { viewModel.setAutoSyncExtractedTasksToDbAndCalendar(it) },
-                        onExtractAndAutoAssignMemberTasks = { customText ->
-                            viewModel.extractAndAutoAssignMemberTasksWithGemini(customText)
-                        },
+                        pendingMemberTasks = pendingMemberTasks.filter { it.sessionId == activeSession.id },
+                        isSavingApprovedTask = isSavingApprovedTask,
+                        onExtractMemberTaskSuggestions = viewModel::extractMemberTaskSuggestions,
+                        onApproveMemberTaskSuggestion = viewModel::approveMemberTaskSuggestion,
+                        onDismissMemberTaskSuggestion = viewModel::dismissMemberTaskSuggestion,
                         onToggleMemberTaskDone = { viewModel.toggleMemberTaskDone(it) },
                         onDeleteMemberTask = { viewModel.deleteMemberTask(it) },
                         officialMinutesDraft = officialMinutesDraft,
@@ -548,7 +548,7 @@ fun AtlasMainScreen(viewModel: MeetingViewModel = viewModel()) {
                             }
                             viewModel.sendAllPendingResolutionReminders(context)
                         },
-                        roomMemberTasks = roomMemberTasks.ifEmpty { lastExtractedMemberTasks },
+                        roomMemberTasks = roomMemberTasks,
                         onToggleMemberTaskDone = { viewModel.toggleMemberTaskDone(it) },
                         onDeleteMemberTask = { viewModel.deleteMemberTask(it) },
                         onSendReminderForMemberTask = { task ->

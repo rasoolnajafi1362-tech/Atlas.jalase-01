@@ -1,14 +1,19 @@
 package com.example.service
 
+import android.Manifest
 import android.annotation.SuppressLint
 import android.content.Context
+import android.content.pm.PackageManager
 import android.media.AudioFormat
 import android.media.AudioRecord
+import android.media.MediaExtractor
+import android.media.MediaFormat
 import android.media.MediaRecorder
 import android.os.Build
 import android.util.Log
 import java.io.File
-import java.io.FileOutputStream
+import java.nio.ByteBuffer
+import java.util.UUID
 import kotlin.math.abs
 import kotlin.math.max
 
@@ -64,6 +69,7 @@ class AudioRecordManager(private val context: Context) {
     private var autoPauseEventsCount: Int = 0
     private var autoResumeEventsCount: Int = 0
 
+    @Volatile
     var isRecording: Boolean = false
         private set
 
@@ -118,23 +124,23 @@ class AudioRecordManager(private val context: Context) {
      * Starts microphone audio recording into an AAC (.m4a) file.
      * Returns the target File if recording started successfully.
      */
+    @Synchronized
     fun startRecording(nowMillis: Long = System.currentTimeMillis()): File? {
         if (isRecording) return currentOutputFile
-
-        val audioDir = getRecordingsDir()
-        val outputFile = File(audioDir, "meeting_audio_${nowMillis}.m4a")
-
-        resetSilenceTracking(nowMillis)
-        accumulatedActiveDurationMillis = 0L
-        activeSegmentStartMillis = nowMillis
+        if (context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            return null
+        }
 
         try {
+            val outputFile = File(getRecordingsDir(), "meeting_audio_${nowMillis}_${UUID.randomUUID()}.m4a")
             val mediaRecorder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 MediaRecorder(context)
             } else {
                 @Suppress("DEPRECATION")
                 MediaRecorder()
             }
+
+            recorder = mediaRecorder
 
             // Use VOICE_RECOGNITION tuned source when noise-reduction priority is active,
             // or standard MIC source otherwise.
@@ -159,31 +165,26 @@ class AudioRecordManager(private val context: Context) {
                 start()
             }
 
-            recorder = mediaRecorder
+            resetSilenceTracking(nowMillis)
+            accumulatedActiveDurationMillis = 0L
+            activeSegmentStartMillis = nowMillis
             currentOutputFile = outputFile
             isRecording = true
             return outputFile
         } catch (e: Exception) {
-            Log.w("AudioRecordManager", "Native MediaRecorder failed (e.g. headless JVM or mic unavailable): ${e.localizedMessage}")
+            Log.w("AudioRecordManager", "Could not start microphone recording", e)
             releaseRecorder()
-
-            // Safe fallback: Create dummy audio header so test environments can operate without failure
-            if (!outputFile.exists()) {
-                try {
-                    FileOutputStream(outputFile).use { it.write(byteArrayOf(0x00, 0x00, 0x00, 0x20, 0x66, 0x74, 0x79, 0x70)) }
-                } catch (ignored: Exception) {}
-            }
-            currentOutputFile = outputFile
-            isRecording = true
-            return outputFile
+            return null
         }
     }
 
     /**
-     * Stops the active recording, releases the MediaRecorder, and returns the recorded File and active duration in seconds.
+     * Stops recording and returns the finalized file and active duration in seconds.
+     * A failed stop or invalid output returns no file and zero duration.
      */
+    @Synchronized
     fun stopRecording(nowMillis: Long = System.currentTimeMillis()): Pair<File?, Long> {
-        if (!isRecording) return Pair(currentOutputFile, 0L)
+        if (!isRecording) return null to 0L
 
         if (isAutoPausedBySilence) {
             if (autoPauseStartedMillis > 0L && nowMillis > autoPauseStartedMillis) {
@@ -194,28 +195,51 @@ class AudioRecordManager(private val context: Context) {
         }
 
         val durationSec = maxOf(1L, accumulatedActiveDurationMillis / 1000L)
-        try {
-            recorder?.stop()
+        val file = currentOutputFile
+        val stopped = try {
+            checkNotNull(recorder).stop()
+            true
         } catch (e: Exception) {
-            Log.e("AudioRecordManager", "stop failed", e)
+            Log.e("AudioRecordManager", "Could not stop microphone recording", e)
+            false
         } finally {
             releaseRecorder()
             releaseFallbackPeakMonitor()
+            currentOutputFile = null
+            isAutoPausedBySilence = false
+            activeSegmentStartMillis = 0L
+            autoPauseStartedMillis = 0L
+            isRecording = false
         }
 
-        val file = currentOutputFile
-        if (file != null && (!file.exists() || file.length() == 0L)) {
-            try {
-                FileOutputStream(file).use {
-                    it.write(byteArrayOf(0x00, 0x00, 0x00, 0x20, 0x66, 0x74, 0x79, 0x70, 0x4D, 0x34, 0x41, 0x20))
-                }
-            } catch (ignored: Exception) {}
+        return if (stopped && file != null && hasReadableAudio(file)) {
+            file to durationSec
+        } else {
+            null to 0L
         }
-        isRecording = false
-        isAutoPausedBySilence = false
-        activeSegmentStartMillis = 0L
-        autoPauseStartedMillis = 0L
-        return Pair(file, durationSec)
+    }
+
+    private fun hasReadableAudio(file: File): Boolean {
+        if (!file.isFile || file.length() == 0L) return false
+
+        try {
+            val extractor = MediaExtractor()
+            try {
+                extractor.setDataSource(file.absolutePath)
+                for (index in 0 until extractor.trackCount) {
+                    val mime = extractor.getTrackFormat(index).getString(MediaFormat.KEY_MIME)
+                    if (mime?.startsWith("audio/") == true) {
+                        extractor.selectTrack(index)
+                        return extractor.readSampleData(ByteBuffer.allocate(64 * 1024), 0) > 0
+                    }
+                }
+            } finally {
+                extractor.release()
+            }
+        } catch (e: Exception) {
+            Log.w("AudioRecordManager", "Could not read finalized recording", e)
+        }
+        return false
     }
 
     /**
@@ -489,7 +513,6 @@ class AudioRecordManager(private val context: Context) {
 
     private fun releaseRecorder() {
         try {
-            recorder?.reset()
             recorder?.release()
         } catch (e: Exception) {
             Log.e("AudioRecordManager", "release failed", e)

@@ -1,20 +1,71 @@
 package com.example
 
+import android.Manifest
+import android.app.Application
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import com.example.data.*
 import com.example.viewmodel.*
 import com.example.util.*
 import com.example.service.*
+import okhttp3.ResponseBody.Companion.toResponseBody
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [36])
 class ExampleRobolectricTest {
+
+    private fun fixtureGemini(payload: org.json.JSONObject, code: Int = 200): GeminiAiService {
+        val part = org.json.JSONObject().put("text", payload.toString())
+        val content = org.json.JSONObject().put("parts", org.json.JSONArray().put(part))
+        val candidate = org.json.JSONObject().put("content", content)
+        val envelope = org.json.JSONObject().put("candidates", org.json.JSONArray().put(candidate))
+        return GeminiAiService(okhttp3.OkHttpClient.Builder().addInterceptor { chain ->
+            okhttp3.Response.Builder()
+                .request(chain.request()).protocol(okhttp3.Protocol.HTTP_1_1)
+                .code(code).message("fixture").body(envelope.toString().toResponseBody()).build()
+        }.build())
+    }
+
+    private fun sentimentFixture() = org.json.JSONObject("""{
+        "overallTone":"آرام","harmonyScore":82,"tensionScore":18,
+        "constructivePercentage":65,"neutralPercentage":20,"tensionPercentage":15,
+        "dominantEmotion":"تمرکز","summaryEvaluation":"نمونه آزمون",
+        "flaggedSegments":[{"timestampRange":"00:00 - 00:05","speaker":"عضو آزمون",
+        "tensionLevel":"متوسط","triggerTopic":"مهلت","quoteExcerpt":"مهلت را بررسی کنیم",
+        "reviewRecommendation":"بازبینی مهلت"}]
+    }""")
+
+    private fun taskFixture(quote: String): org.json.JSONObject {
+        val task = org.json.JSONObject().put("assigneeName", "سخنران")
+            .put("taskTitle", "نهایی‌سازی گزارش").put("calendarDate", "1405/08/20")
+            .put("deadlineLabel", "1405/08/20").put("sourceQuote", quote)
+        return org.json.JSONObject().put("tasks", org.json.JSONArray().put(task))
+    }
+
+    @Test
+    fun `Gemini failures do not turn into fabricated sentiment or tasks`() = kotlinx.coroutines.runBlocking {
+        val session = MeetingSession(title = "جلسهٔ آزمون")
+        val requestText = "گزارش را بررسی کنید."
+        val error = fixtureGemini(org.json.JSONObject(), 503)
+        assertTrue(error.analyzeAudioSentimentAndTension(null, session, "fixture").isFailure)
+        assertTrue(error.extractAssigneesAndActionItemsFromMeetingText(session, requestText, "fixture").isFailure)
+
+        val incomplete = fixtureGemini(org.json.JSONObject())
+        assertTrue(incomplete.analyzeAudioSentimentAndTension(null, session, "fixture").isFailure)
+        assertTrue(incomplete.extractAssigneesAndActionItemsFromMeetingText(session, requestText, "fixture").isFailure)
+
+        val empty = fixtureGemini(org.json.JSONObject().put("tasks", org.json.JSONArray()))
+        assertTrue(empty.extractAssigneesAndActionItemsFromMeetingText(session, requestText, "fixture").getOrThrow().isEmpty())
+        val ungrounded = fixtureGemini(taskFixture("عبارتی که در جلسه نیست"))
+        assertTrue(ungrounded.extractAssigneesAndActionItemsFromMeetingText(session, requestText, "fixture").getOrThrow().isEmpty())
+    }
+
 
     @Test
     fun `read string from context matches atlas app name`() {
@@ -99,10 +150,9 @@ class ExampleRobolectricTest {
         val app = ApplicationProvider.getApplicationContext<android.app.Application>()
         val vm = com.example.viewmodel.MeetingViewModel(app)
 
-        val targetMember = vm.activeSession.value.members.first()
-        // set absent
-        vm.updateMember(0, targetMember.copy(isPresent = false))
-        assertFalse(vm.activeSession.value.members.first().isPresent)
+        vm.addAttendeeWithDetails("شرکت‌کنندهٔ آزمایشی", "عضو", "آزمون", isPresent = false)
+        val targetMember = vm.activeSession.value.members.single()
+        assertFalse(targetMember.isPresent)
 
         val qrPayload = com.example.util.QrCodeGenerator.createMemberCheckInPayload(
             sessionId = vm.activeSession.value.id,
@@ -120,14 +170,14 @@ class ExampleRobolectricTest {
     }
 
     @Test
+    @org.robolectric.annotation.GraphicsMode(org.robolectric.annotation.GraphicsMode.Mode.NATIVE)
     fun `test session qr code encode decode with zxing marks all members present`() {
         val app = ApplicationProvider.getApplicationContext<android.app.Application>()
         val vm = com.example.viewmodel.MeetingViewModel(app)
 
-        // Set all members absent first
-        vm.activeSession.value.members.forEachIndexed { idx, m ->
-            vm.updateMember(idx, m.copy(isPresent = false))
-        }
+        vm.addAttendeeWithDetails("عضو آزمایشی اول", "عضو", "آزمون", isPresent = false)
+        vm.addAttendeeWithDetails("عضو آزمایشی دوم", "عضو", "آزمون", isPresent = false)
+        assertEquals(2, vm.activeSession.value.members.size)
         assertTrue(vm.activeSession.value.members.none { it.isPresent })
 
         // Generate Session QR Payload in Setup tab format
@@ -451,7 +501,11 @@ class ExampleRobolectricTest {
     }
 
     @Test
+    @Config(shadows = [RecordingMediaRecorderShadow::class])
     fun `test AudioRecordManager recording lifecycle and amplitude tracking`() {
+        RecordingMediaRecorderShadow.resetRecordingShadow()
+        shadowOf(ApplicationProvider.getApplicationContext<Application>())
+            .grantPermissions(Manifest.permission.RECORD_AUDIO)
         val context = ApplicationProvider.getApplicationContext<Context>()
         val manager = AudioRecordManager(context)
 
@@ -643,7 +697,12 @@ class ExampleRobolectricTest {
 
     @Test
     fun `test BoardAnalyticsEngine computes attendance trends and action completion over time`() {
-        val session = PredefinedScenarios.getScenario("board_cold_chain")
+        val fixture = PredefinedScenarios.getScenario("board_cold_chain")
+        val session = fixture.copy(
+            members = fixture.members.mapIndexed { index, member ->
+                member.copy(name = "عضو آزمایشی ${index + 1}")
+            }
+        )
         val roomAttendees = session.members.mapIndexed { idx, m ->
             com.example.data.local.AttendeeEntity.fromMember(m, session.id, idx)
         }
@@ -656,8 +715,7 @@ class ExampleRobolectricTest {
             selectedBoardMemberName = null
         )
 
-        // Should have multi-period trend points ending with current session
-        assertTrue(analytics.trendSeries.size >= 5)
+        assertEquals(listOf(archivedSession.id, session.id), analytics.trendSeries.map { it.sessionId })
         val latestPoint = analytics.trendSeries.last()
         assertEquals(session.id, latestPoint.sessionId)
         assertTrue(latestPoint.attendanceRatePercent in 0..100)
@@ -665,17 +723,21 @@ class ExampleRobolectricTest {
 
         // Board members performance list should match roomAttendees
         assertEquals(roomAttendees.size, analytics.boardMembers.size)
-        assertTrue(analytics.boardMembers.any { it.name.contains("سخنران") })
+        assertEquals(session.members.map { it.name }, analytics.boardMembers.map { it.name })
 
         // Filter by specific board member
+        val selected = roomAttendees.first()
         val filteredAnalytics = com.example.ui.components.BoardAnalyticsEngine.computeAnalytics(
             activeSession = session,
             roomAttendees = roomAttendees,
-            archiveList = listOf(archivedSession),
-            selectedBoardMemberName = "سخنران"
+            archiveList = emptyList(),
+            selectedBoardMemberName = selected.name
         )
-        assertEquals(1, filteredAnalytics.boardMembers.size)
-        assertEquals("سخنران", filteredAnalytics.boardMembers.first().name)
+        val performance = filteredAnalytics.boardMembers.single()
+        assertEquals(selected.id, performance.memberId)
+        assertEquals(1, performance.sessionsTotal)
+        assertEquals(if (selected.isPresent) 1 else 0, performance.sessionsPresent)
+        assertEquals(1, filteredAnalytics.trendSeries.size)
     }
 
     @Test
@@ -798,7 +860,11 @@ class ExampleRobolectricTest {
     }
 
     @Test
+    @Config(shadows = [RecordingMediaRecorderShadow::class])
     fun `test 5-second silence detection auto-pauses recording and resumes when speech is detected`() {
+        RecordingMediaRecorderShadow.resetRecordingShadow()
+        shadowOf(ApplicationProvider.getApplicationContext<Application>())
+            .grantPermissions(Manifest.permission.RECORD_AUDIO)
         val context = ApplicationProvider.getApplicationContext<Context>()
         val manager = com.example.service.AudioRecordManager(context)
 
@@ -1078,14 +1144,14 @@ class ExampleRobolectricTest {
     }
 
     @Test
-    fun `test audio sentiment analysis and high tension segment detection with Gemini fallback`() = kotlinx.coroutines.runBlocking {
-        val geminiService = GeminiAiService()
+    fun `test audio sentiment analysis and high tension segment detection with a controlled Gemini response`() = kotlinx.coroutines.runBlocking {
+        val geminiService = fixtureGemini(sentimentFixture())
         val testSession = PredefinedScenarios.getScenario("board_cold_chain")
 
         val result = geminiService.analyzeAudioSentimentAndTension(
             audioFile = null,
             session = testSession,
-            customApiKey = ""
+            customApiKey = "fixture"
         )
         assertTrue(result.isSuccess)
         val sentiment = result.getOrNull()
@@ -1110,7 +1176,8 @@ class ExampleRobolectricTest {
     @Test
     fun `test audio sentiment viewmodel integration, toggle reviewed, and add resolution to meeting notes`() = kotlinx.coroutines.runBlocking {
         val app = ApplicationProvider.getApplicationContext<android.app.Application>()
-        val vm = MeetingViewModel(app)
+        val vm = MeetingViewModel(app, fixtureGemini(sentimentFixture()))
+        vm.setGeminiApiKey("fixture")
         vm.loadScenario("board_cold_chain")
 
         // Trigger sentiment analysis
@@ -1241,6 +1308,58 @@ class ExampleRobolectricTest {
     }
 
     @Test
+    fun `post recording analysis rejects service failure and preserves empty decisions`() {
+        kotlinx.coroutines.runBlocking {
+            val audio = kotlin.io.path.createTempFile(suffix = ".m4a").toFile()
+            try {
+                audio.writeBytes(byteArrayOf(1, 2, 3))
+                fun service(code: Int, payload: org.json.JSONObject): GeminiAiService {
+                    val envelope = org.json.JSONObject().put("candidates", org.json.JSONArray().put(
+                        org.json.JSONObject().put("content", org.json.JSONObject().put("parts",
+                            org.json.JSONArray().put(org.json.JSONObject().put("text", payload.toString()))
+                        ))
+                    ))
+                    return GeminiAiService(
+                        okhttp3.OkHttpClient.Builder().addInterceptor { chain ->
+                            okhttp3.Response.Builder()
+                                .request(chain.request())
+                                .protocol(okhttp3.Protocol.HTTP_1_1)
+                                .code(code)
+                                .message("fixture")
+                                .body(envelope.toString().toResponseBody())
+                                .build()
+                        }.build()
+                    )
+                }
+
+                val session = MeetingSession(title = "جلسهٔ آزمایشی")
+                val rejected = service(503, org.json.JSONObject())
+                    .generatePostRecordingExecutiveSummary(audio, session, customApiKey = "fixture")
+                assertTrue(rejected.isFailure)
+
+                val incomplete = service(200, org.json.JSONObject())
+                    .generatePostRecordingExecutiveSummary(audio, session, customApiKey = "fixture")
+                assertTrue(incomplete.isFailure)
+
+                val payload = org.json.JSONObject()
+                    .put("transcription", "متن آزمایشی")
+                    .put("executiveSummary", "خلاصهٔ آزمایشی")
+                    .put("keyDecisions", org.json.JSONArray())
+                    .put("actionItems", org.json.JSONArray())
+                val analysis = service(200, payload)
+                    .generatePostRecordingExecutiveSummary(audio, session, customApiKey = "fixture")
+                    .getOrThrow()
+                assertTrue(analysis.keyDecisions.isEmpty())
+                assertTrue(analysis.actionItems.isEmpty())
+                assertEquals("متن آزمایشی", analysis.fullTranscription)
+                assertArrayEquals(byteArrayOf(1, 2, 3), audio.readBytes())
+            } finally {
+                audio.delete()
+            }
+        }
+    }
+
+    @Test
     fun `test Room ExecutiveSummaryEntity, ExecutiveSummaryDao, and ExecutiveSummaryRepository persistence`() = kotlinx.coroutines.runBlocking {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val db = com.example.data.local.AtlasDatabase.createInMemory(context)
@@ -1256,18 +1375,14 @@ class ExampleRobolectricTest {
             audioFilePath = "/data/user/0/com.example/files/atlas_recordings/test_session.m4a",
             audioDurationSec = 185L
         )
-        val geminiService = GeminiAiService()
-        val analysisResult = geminiService.generatePostRecordingExecutiveSummary(
-            audioFile = null,
-            session = testSession,
-            durationSec = 185L,
-            customApiKey = ""
+        val analysis = AudioMeetingAnalysis(
+            fullTranscription = "سخنران: گزارش نمونه بررسی شد.",
+            executiveSummary = "خلاصهٔ آزمایشی برای آزمون ثبت در Room.",
+            keyDecisions = listOf("گزارش نمونه برای بازبینی ارسال شود."),
+            actionItems = emptyList(),
+            audioDurationSec = 185L,
+            audioFileName = "test_session.m4a"
         )
-        assertTrue(analysisResult.isSuccess)
-        val analysis = analysisResult.getOrNull()!!
-        assertTrue("Executive summary must not be blank", analysis.executiveSummary.isNotBlank())
-        assertTrue("Key decisions must be extracted", analysis.keyDecisions.isNotEmpty())
-        assertTrue("Action items must be extracted", analysis.actionItems.isNotEmpty())
 
         // Save to Room database
         val savedEntity = execSummaryRepo.saveExecutiveSummary(
@@ -1291,43 +1406,41 @@ class ExampleRobolectricTest {
     }
 
     @Test
-    fun `test automatic Gemini executive summary generation and Room persistence immediately after stopping audio recording`() = kotlinx.coroutines.runBlocking {
-        val app = ApplicationProvider.getApplicationContext<android.app.Application>()
-        val vm = MeetingViewModel(app)
-        vm.loadScenario("board_cold_chain")
+    @Config(shadows = [RecordingMediaRecorderShadow::class])
+    fun `failed Gemini analysis after stopping preserves recording and does not persist summary`() = kotlinx.coroutines.runBlocking {
+        RecordingMediaRecorderShadow.resetRecordingShadow()
+        val app = ApplicationProvider.getApplicationContext<Application>()
+        shadowOf(app).grantPermissions(Manifest.permission.RECORD_AUDIO)
+        val requestSeen = java.util.concurrent.atomic.AtomicBoolean(false)
+        val client = okhttp3.OkHttpClient.Builder().addInterceptor {
+            requestSeen.set(true)
+            throw java.io.IOException("offline fixture")
+        }.build()
+        val vm = MeetingViewModel(app, GeminiAiService(client))
+        vm.startNewBlankSession()
+        vm.setGeminiApiKey("fixture")
 
-        assertTrue("Auto-summarize on recording stop should be enabled by default", vm.autoSummarizeOnRecordingStop.value)
-        assertFalse(vm.isAudioRecording.value)
-
-        // 1. Start audio recording
         vm.toggleAudioRecording()
-        assertTrue("Recording should now be active", vm.isAudioRecording.value)
-
-        // 2. Stop audio recording -> must immediately trigger Gemini Executive Summary generation & Room persistence
+        assertTrue("Recording starts", vm.isAudioRecording.value)
         vm.toggleAudioRecording()
-        assertFalse("Recording should now be stopped", vm.isAudioRecording.value)
+        assertFalse("Recording stops", vm.isAudioRecording.value)
+        val filePath = vm.activeSession.value.audioFilePath
+        assertFalse("Recording is linked to the active session", filePath.isNullOrBlank())
+        val audio = java.io.File(requireNotNull(filePath))
+        assertTrue("Saved recording is readable", audio.length() > 0)
 
-        // Wait for async post-recording coroutine to complete
-        for (i in 0 until 60) {
-            org.robolectric.shadows.ShadowLooper.idleMainLooper()
-            if (vm.lastPersistedRoomSummary.value != null && !vm.isAudioProcessingWithGemini.value) break
-            kotlinx.coroutines.delay(25)
+        kotlinx.coroutines.withTimeout(10_000) {
+            while (vm.audioProcessingError.value == null || vm.isAudioProcessingWithGemini.value) {
+                org.robolectric.shadows.ShadowLooper.idleMainLooper()
+                kotlinx.coroutines.delay(25)
+            }
         }
 
-        // Verify in-memory ViewModel state updated with Executive Summary & decisions
-        val analysis = vm.audioMeetingAnalysis.value
-        assertNotNull("AudioMeetingAnalysis must be automatically generated upon stopping recording", analysis)
-        assertTrue("Generated executiveSummary must not be blank", analysis!!.executiveSummary.isNotBlank())
-        assertTrue("Generated keyDecisions must not be empty", analysis.keyDecisions.isNotEmpty())
-        assertTrue("Active session aiSummary must be updated with Executive Summary", vm.activeSession.value.aiSummary.contains("خلاصه اجرایی"))
-
-        // Verify Room database persistence
-        val persistedInRoom = vm.getLatestSavedExecutiveSummaryOnce()
-        assertNotNull("ExecutiveSummaryEntity must be saved in Room database immediately after recording stops", persistedInRoom)
-        assertEquals(vm.activeSession.value.id, persistedInRoom!!.sessionId)
-        assertTrue("Entity must be flagged as auto-generated on stop", persistedInRoom.isAutoGeneratedOnStop)
-        assertEquals(analysis.executiveSummary, persistedInRoom.executiveSummary)
-        assertTrue("Room entity must contain key decisions", persistedInRoom.getKeyDecisionsList().isNotEmpty())
+        assertTrue("The controlled service received the recording", requestSeen.get())
+        assertNull("No fabricated analysis shown", vm.audioMeetingAnalysis.value)
+        assertNull("No fabricated summary persisted", vm.getLatestSavedExecutiveSummaryOnce())
+        assertEquals(filePath, vm.activeSession.value.audioFilePath)
+        assertTrue("Recording survives failed analysis", audio.length() > 0)
     }
 
     @Test
@@ -1346,15 +1459,15 @@ class ExampleRobolectricTest {
             مدیر مالی موظف شد متمم بودجه پالت‌های استاندارد را تا فردا به هیئت‌مدیره ارسال کند.
         """.trimIndent()
 
-        val geminiService = GeminiAiService()
+        val geminiService = fixtureGemini(taskFixture(rawMeetingText.lineSequence().first()))
         val extractionResult = geminiService.extractAssigneesAndActionItemsFromMeetingText(
             session = testSession,
             customMeetingText = rawMeetingText,
-            customApiKey = ""
+            customApiKey = "fixture"
         )
         assertTrue(extractionResult.isSuccess)
         val extractedTasks = extractionResult.getOrNull()!!
-        assertTrue("Must extract multiple tasks from meeting text and notes", extractedTasks.size >= 2)
+        assertEquals(1, extractedTasks.size)
 
         // Verify assignees and normalized calendar dates
         assertTrue("Atlas Team must be identified as a responsible assignee", extractedTasks.any { it.assigneeName.contains("سخنران") })
@@ -1382,27 +1495,44 @@ class ExampleRobolectricTest {
     }
 
     @Test
-    fun `test ViewModel extractAndAutoAssignMemberTasksWithGemini automatically adds tasks to Room database and calendar`() = kotlinx.coroutines.runBlocking {
-        val app = ApplicationProvider.getApplicationContext<android.app.Application>()
-        val vm = MeetingViewModel(app)
-        vm.loadScenario("board_cold_chain")
+    fun `task suggestions need explicit approval before Room and calendar persistence`() = kotlinx.coroutines.runBlocking {
+        val app = ApplicationProvider.getApplicationContext<Application>()
+        val customText = "مقرر شد سخنران تا 1405/08/20 گزارش را نهایی کند."
+        val vm = MeetingViewModel(app, fixtureGemini(taskFixture(customText)))
+        vm.startNewBlankSession()
+        vm.setGeminiApiKey("fixture")
 
-        val customText = "مقرر شد سخنران تا 1405/08/20 مستندات ممیزی زنجیره سرد را نهایی کند."
-        vm.extractAndAutoAssignMemberTasksWithGemini(customText)
-
-        for (i in 0 until 60) {
-            org.robolectric.shadows.ShadowLooper.idleMainLooper()
-            if (vm.lastExtractedMemberTasks.value.isNotEmpty() && !vm.isExtractingMemberTasks.value) break
-            kotlinx.coroutines.delay(25)
+        suspend fun extract(): com.example.data.local.MemberTaskEntity {
+            vm.extractMemberTaskSuggestions(customText)
+            kotlinx.coroutines.withTimeout(10_000) {
+                while (vm.isExtractingMemberTasks.value) {
+                    org.robolectric.shadows.ShadowLooper.idleMainLooper()
+                    kotlinx.coroutines.delay(25)
+                }
+            }
+            return vm.pendingMemberTasks.value.single()
         }
 
-        val extracted = vm.lastExtractedMemberTasks.value
-        assertTrue("Extracted member tasks must not be empty", extracted.isNotEmpty())
-        assertTrue("Must contain task assigned to Atlas Team", extracted.any { it.assigneeName.contains("سخنران") })
+        val rejected = extract()
+        assertTrue(vm.getMemberTasksForSessionFromRoomOnce().isEmpty())
+        vm.dismissMemberTaskSuggestion(rejected)
+        assertTrue(vm.pendingMemberTasks.value.isEmpty())
+        assertTrue(vm.getMemberTasksForSessionFromRoomOnce().isEmpty())
 
-        val persistedInRoom = vm.getMemberTasksForSessionFromRoomOnce()
-        assertTrue("Extracted tasks must be automatically persisted in Room member_tasks table", persistedInRoom.isNotEmpty())
-        assertTrue("Tasks in Room must have calendarDate populated for Calendar view", persistedInRoom.all { it.calendarDate.isNotBlank() })
+        val approved = extract()
+        vm.approveMemberTaskSuggestion(approved)
+        vm.approveMemberTaskSuggestion(approved)
+        kotlinx.coroutines.withTimeout(10_000) {
+            while (vm.isSavingApprovedTask.value) {
+                org.robolectric.shadows.ShadowLooper.idleMainLooper()
+                kotlinx.coroutines.delay(25)
+            }
+        }
+        val persisted = vm.getMemberTasksForSessionFromRoomOnce().single()
+        assertEquals(approved.taskTitle, persisted.taskTitle)
+        assertTrue(persisted.isAddedToCalendar)
+        assertEquals("1405/08/20", persisted.calendarDate)
+        assertTrue(vm.pendingMemberTasks.value.isEmpty())
     }
 
     @Test
@@ -1510,15 +1640,17 @@ class ExampleRobolectricTest {
         val vm = MeetingViewModel(app)
         vm.loadScenario("board_cold_chain")
 
-        // 1. Extract and persist board member action items into Room
-        vm.extractAndAutoAssignMemberTasksWithGemini(
-            customMeetingText = "مصوب شد سخنران تا پایان هفته سامانه پایش زنجیره سرد را راه‌اندازی نماید. همچنین سارا احمدی موظف شد گزارش حسابرسی انبار را تا فردا تحویل دهد."
+        val repository = com.example.data.local.MemberTaskRepository(
+            com.example.data.local.AtlasDatabase.getInstance(app).memberTaskDao()
         )
-        for (i in 0 until 60) {
-            org.robolectric.shadows.ShadowLooper.idleMainLooper()
-            if (!vm.isExtractingMemberTasks.value && vm.lastExtractedMemberTasks.value.isNotEmpty()) break
-            kotlinx.coroutines.delay(25)
-        }
+        val session = vm.activeSession.value
+        repository.saveExtractedMemberTasks(session.id, listOf(
+            com.example.data.local.MemberTaskEntity(
+                sessionId = session.id, sessionTitle = session.title,
+                assigneeName = "سخنران", taskTitle = "وظیفهٔ تأییدشدهٔ آزمون",
+                deadlineLabel = "1405/08/20", calendarDate = "1405/08/20", isAddedToCalendar = true
+            )
+        ))
 
         val roomTasks = vm.getMemberTasksForSessionFromRoomOnce()
         assertTrue("Room member_tasks table must contain extracted board member tasks", roomTasks.isNotEmpty())
@@ -1535,7 +1667,7 @@ class ExampleRobolectricTest {
         val rasoolStats = analytics.boardMembers.find { it.name.contains("سخنران") }
         assertNotNull("Atlas Team must be present in quarterly board member analytics", rasoolStats)
         assertTrue("Attendance frequency over last quarter must be > 0", rasoolStats!!.sessionsPresent > 0)
-        assertTrue("Volume of assigned action items must include Room tasks", rasoolStats.totalActions >= 2)
+        assertTrue("Volume of assigned action items must include Room tasks", rasoolStats.totalActions >= 1)
 
         // 3. Verify Smart Meeting Minutes Filter state updates (محدوده جلسه, وضعیت مصوبه, عضو مسئول)
         vm.updateListFilterScope("internal")
@@ -1669,7 +1801,11 @@ class ExampleRobolectricTest {
     }
 
     @Test
+    @Config(shadows = [RecordingMediaRecorderShadow::class])
     fun `test Android audio recording and instant Speech-to-Text auto-typing into meeting minutes`() {
+        RecordingMediaRecorderShadow.resetRecordingShadow()
+        shadowOf(ApplicationProvider.getApplicationContext<Application>())
+            .grantPermissions(Manifest.permission.RECORD_AUDIO)
         val app = ApplicationProvider.getApplicationContext<android.app.Application>()
         val vm = MeetingViewModel(app)
         vm.loadScenario("board_cold_chain")
@@ -1715,6 +1851,7 @@ class ExampleRobolectricTest {
         val app = ApplicationProvider.getApplicationContext<android.app.Application>()
         val vm = MeetingViewModel(app)
         vm.loadScenario("board_cold_chain")
+        val initialTaskIds = vm.getMemberTasksForSessionFromRoomOnce().map { it.id }
 
         val sampleTypedMeetingText = """
             [00:02:15] سخنران: مصوب شد سامانه پایش برخط دمای ناوگان زنجیره سرد با مسئولیت سخنران تا پایان هفته عملیاتی گردد.
@@ -1771,12 +1908,9 @@ class ExampleRobolectricTest {
             analysis.assignedTasksByPerson.any { it.personName.contains("سخنران") && it.taskTitle.contains("ممیزی") }
         )
 
-        // 4. Verify per-person tasks are persisted in Room member_tasks table
-        val roomTasks = vm.getMemberTasksForSessionFromRoomOnce()
-        assertTrue(
-            "Extracted per-person tasks must be persisted in Room member_tasks table",
-            roomTasks.any { it.assigneeName.contains("سخنران") }
-        )
+        assertEquals(initialTaskIds, vm.getMemberTasksForSessionFromRoomOnce().map { it.id })
+        assertTrue("Draft tasks are not marked as recorded",
+            vm.activeSession.value.transcriptionAnalysis!!.actionItems.none { it.isAddedToNotes })
     }
 
     @Test

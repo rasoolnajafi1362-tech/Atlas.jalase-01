@@ -64,9 +64,11 @@ fun AiAssistantScreen(
     extractedMemberTasks: List<MemberTaskEntity> = emptyList(),
     isExtractingMemberTasks: Boolean = false,
     memberTaskExtractionError: String? = null,
-    autoSyncExtractedTasksToDbAndCalendar: Boolean = true,
-    onAutoSyncExtractedTasksChange: (Boolean) -> Unit = {},
-    onExtractAndAutoAssignMemberTasks: (String) -> Unit = {},
+    pendingMemberTasks: List<MemberTaskEntity> = emptyList(),
+    isSavingApprovedTask: Boolean = false,
+    onExtractMemberTaskSuggestions: (String) -> Unit = {},
+    onApproveMemberTaskSuggestion: (MemberTaskEntity) -> Unit = {},
+    onDismissMemberTaskSuggestion: (MemberTaskEntity) -> Unit = {},
     onToggleMemberTaskDone: (MemberTaskEntity) -> Unit = {},
     onDeleteMemberTask: (Int) -> Unit = {},
     officialMinutesDraft: com.example.data.OfficialMinutesDraft? = null,
@@ -184,7 +186,7 @@ fun AiAssistantScreen(
                 modifier = Modifier.testTag("ai_typed_minutes_analyzer_panel")
             ) {
                 Text(
-                    text = "متن تایپ‌شده از جلسات (تایپ صوتی Speech-to-Text یا یادداشت دستی) به صورت خودکار توسط Gemini API واکاوی شده و ۱) متن رسمی صورت‌جلسه، ۲) تصمیمات اتخاذ شده و ۳) وظایف محول شده به هر شخص استخراج و در دیتابیس Room ثبت می‌گردد.",
+                    text = "Gemini از متن جلسه پیش‌نویس صورت‌جلسه، تصمیم‌ها و وظایف پیشنهادی تهیه می‌کند. وظایف پس از بازبینی قابل ثبت‌اند.",
                     color = TextSub,
                     fontSize = 11.sp,
                     lineHeight = 17.sp
@@ -263,7 +265,7 @@ fun AiAssistantScreen(
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         Text(
-                            text = "📄 ۱. صورت‌جلسه رسمی استخراج‌شده:",
+                            text = "پیش‌نویس صورت‌جلسه",
                             color = AccentCyan,
                             fontSize = 11.sp,
                             fontWeight = FontWeight.ExtraBold
@@ -342,62 +344,16 @@ fun AiAssistantScreen(
         // --- Gemini Assignee & Action Item Extraction -> Auto-Add to Calendar & Member Task List in Room ---
         item {
             QuantumPanel(
-                title = "📋 استخراج هوشمند مسئولین و وظایف محوله با Gemini (ثبت خودکار در تقویم و دیتابیس اعضا)",
+                title = "📋 استخراج و بازبینی وظایف جلسه",
                 badgeText = if (isExtractingMemberTasks) "⏳ در حال تحلیل..." else "${extractedMemberTasks.size} وظیفه در Room",
                 modifier = Modifier.testTag("ai_extract_member_tasks_panel")
             ) {
                 Text(
-                    text = "تحلیل متن کامل جلسه (یادداشت‌ها، مذاکرات صوتی یا متن دلخواه) با هوش مصنوعی Gemini جهت شناسایی نام افراد مسئول (Assignees) و وظایف محوله (Action Items) و افزودن خودکار به تقویم سازمانی و لیست وظایف اعضا در دیتابیس Room.",
+                    text = "مسئول، موعد و شاهد هر پیشنهاد را مرور کنید. فقط وظایف تأییدشده ثبت می‌شوند.",
                     color = TextSub,
                     fontSize = 11.sp,
                     lineHeight = 17.sp
                 )
-
-                Spacer(modifier = Modifier.height(10.dp))
-
-                // Auto-sync to Calendar & Room Database Switch
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(if (autoSyncExtractedTasksToDbAndCalendar) AccentEmerald.copy(alpha = 0.12f) else BgInput)
-                        .border(
-                            1.dp,
-                            if (autoSyncExtractedTasksToDbAndCalendar) AccentEmerald.copy(alpha = 0.45f) else BorderSubtle,
-                            RoundedCornerShape(8.dp)
-                        )
-                        .padding(horizontal = 10.dp, vertical = 6.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.EventAvailable,
-                            contentDescription = null,
-                            tint = if (autoSyncExtractedTasksToDbAndCalendar) AccentEmeraldLight else TextMuted,
-                            modifier = Modifier.size(16.dp)
-                        )
-                        Text(
-                            text = "افزودن خودکار وظایف استخراج‌شده به تقویم و جدول member_tasks در دیتابیس Room",
-                            color = TextMain,
-                            fontSize = 10.5.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-                    Switch(
-                        checked = autoSyncExtractedTasksToDbAndCalendar,
-                        onCheckedChange = onAutoSyncExtractedTasksChange,
-                        colors = SwitchDefaults.colors(
-                            checkedThumbColor = Color.White,
-                            checkedTrackColor = AccentEmerald
-                        ),
-                        modifier = Modifier.testTag("auto_sync_tasks_switch")
-                    )
-                }
 
                 Spacer(modifier = Modifier.height(10.dp))
 
@@ -424,8 +380,8 @@ fun AiAssistantScreen(
                 Spacer(modifier = Modifier.height(10.dp))
 
                 Button(
-                    onClick = { onExtractAndAutoAssignMemberTasks(customMeetingTextForTasks) },
-                    enabled = !isExtractingMemberTasks,
+                    onClick = { onExtractMemberTaskSuggestions(customMeetingTextForTasks) },
+                    enabled = !isExtractingMemberTasks && pendingMemberTasks.isEmpty() && !isSavingApprovedTask,
                     colors = ButtonDefaults.buttonColors(
                         containerColor = AccentEmerald,
                         contentColor = Color.White
@@ -439,17 +395,45 @@ fun AiAssistantScreen(
                     if (isExtractingMemberTasks) {
                         CircularProgressIndicator(color = Color.White, modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
                         Spacer(modifier = Modifier.width(6.dp))
-                        Text("در حال استخراج مسئولین و ثبت در تقویم و دیتابیس Room...", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        Text("در حال استخراج پیشنهادها...", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                     } else {
                         Icon(Icons.Default.AssignmentInd, contentDescription = null, modifier = Modifier.size(17.dp))
                         Spacer(modifier = Modifier.width(6.dp))
-                        Text("✨ استخراج مسئولین و وظایف با Gemini + ثبت خودکار در تقویم و دیتابیس", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        Text("استخراج پیشنهادهای وظیفه", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                     }
                 }
 
                 memberTaskExtractionError?.let { err ->
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(text = "خطا: $err", color = AccentRose, fontSize = 11.sp)
+                }
+
+                if (pendingMemberTasks.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text("در انتظار بازبینی", color = TextMain, fontWeight = FontWeight.Bold)
+                    pendingMemberTasks.forEach { task ->
+                        val hasOwner = task.assigneeName.isNotBlank() &&
+                            !task.assigneeName.equals("OWNER_REQUIRED", ignoreCase = true)
+                        Column(modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
+                            Text(task.taskTitle, color = TextMain, fontWeight = FontWeight.Bold)
+                            Text(
+                                if (hasOwner) "مسئول پیشنهادی: ${task.assigneeName}" else "مسئول مشخص نشده",
+                                color = TextSub
+                            )
+                            Text("موعد: ${task.calendarDate.ifBlank { "ثبت نشده" }}", color = TextSub)
+                            Text("شاهد: «${task.sourceQuote}»", color = TextSub)
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Button(
+                                    onClick = { onApproveMemberTaskSuggestion(task) },
+                                    enabled = hasOwner && !isSavingApprovedTask
+                                ) { Text("تأیید و ثبت") }
+                                TextButton(
+                                    onClick = { onDismissMemberTaskSuggestion(task) },
+                                    enabled = !isSavingApprovedTask
+                                ) { Text("رد پیشنهاد") }
+                            }
+                        }
+                    }
                 }
 
                 if (extractedMemberTasks.isNotEmpty()) {
@@ -621,7 +605,11 @@ fun AiAssistantScreen(
                                                     .padding(horizontal = 6.dp, vertical = 2.dp)
                                             ) {
                                                 Text(
-                                                    text = if (task.isDone) "✅ تکمیل‌شده" else "📌 ثبت در تقویم و کارتابل",
+                                                    text = when {
+                                        task.isDone -> "تکمیل‌شده"
+                                        task.isAddedToCalendar -> "ثبت در تقویم و کارتابل"
+                                        else -> "ثبت در کارتابل"
+                                    },
                                                     color = AccentEmeraldLight,
                                                     fontSize = 9.sp,
                                                     fontWeight = FontWeight.Bold

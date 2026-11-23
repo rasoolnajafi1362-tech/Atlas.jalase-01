@@ -39,12 +39,12 @@ data class GroundedSearchResult(
     val sources: List<GroundedSource> = emptyList()
 )
 
-class GeminiAiService {
-
-    private val client = OkHttpClient.Builder()
+class GeminiAiService(
+    private val client: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)
         .build()
+) {
 
     private fun resolveApiKey(customApiKey: String?): String {
         val buildConfigKey = try {
@@ -1121,7 +1121,7 @@ $summariesBuilder
     ): Result<AudioSentimentAnalysis> = withContext(Dispatchers.IO) {
         val apiKey = resolveApiKey(customApiKey)
         if (apiKey.isBlank()) {
-            return@withContext Result.success(generateContextualSentimentFallback(session))
+            return@withContext Result.failure(IllegalStateException("تنظیمات Gemini برای تحلیل لحن کامل نیست."))
         }
 
         val notesText = if (session.notes.isNotEmpty()) {
@@ -1243,13 +1243,13 @@ $specialContext
             val responseString = response.body?.string() ?: ""
 
             if (!response.isSuccessful) {
-                return@withContext Result.success(generateContextualSentimentFallback(session))
+                return@withContext Result.failure(IllegalStateException("سرویس Gemini تحلیل لحن را انجام نداد."))
             }
 
             val rootJson = JSONObject(responseString)
             val candidates = rootJson.optJSONArray("candidates")
             if (candidates == null || candidates.length() == 0) {
-                return@withContext Result.success(generateContextualSentimentFallback(session))
+                return@withContext Result.failure(IllegalStateException("پاسخ تحلیل لحن خالی است."))
             }
 
             val candidate = candidates.getJSONObject(0)
@@ -1271,12 +1271,12 @@ $specialContext
                     val s = flaggedArr.getJSONObject(i)
                     flaggedList.add(
                         HighTensionSegment(
-                            timestampRange = s.optString("timestampRange", "00:00 - 01:00"),
-                            speaker = s.optString("speaker", "عضو مسئول"),
-                            tensionLevel = s.optString("tensionLevel", "شدید"),
-                            triggerTopic = s.optString("triggerTopic", "اختلاف نظر در اولویت‌بندی"),
-                            quoteExcerpt = s.optString("quoteExcerpt", ""),
-                            reviewRecommendation = s.optString("reviewRecommendation", "بازبینی مجدد توسط هیئت‌مدیره"),
+                            timestampRange = s.optString("timestampRange", ""),
+                            speaker = s.optString("speaker", ""),
+                            tensionLevel = s.optString("tensionLevel", ""),
+                            triggerTopic = s.optString("triggerTopic", ""),
+                            quoteExcerpt = s.getString("quoteExcerpt").trim().also { require(it.isNotBlank()) },
+                            reviewRecommendation = s.optString("reviewRecommendation", ""),
                             isReviewed = false,
                             reviewNotes = ""
                         )
@@ -1284,112 +1284,32 @@ $specialContext
                 }
             }
 
-            val fallback = generateContextualSentimentFallback(session)
+            fun requiredText(key: String): String =
+                (json.opt(key) as? String)?.trim()?.takeIf { it.isNotEmpty() }
+                    ?: throw IllegalArgumentException("Missing sentiment field: $key")
+            fun requiredPercent(key: String): Int =
+                (json.opt(key) as? Int)?.takeIf { it in 0..100 }
+                    ?: throw IllegalArgumentException("Invalid sentiment score: $key")
 
             val parsedSentiment = AudioSentimentAnalysis(
-                overallTone = json.optString("overallTone", fallback.overallTone),
-                harmonyScore = json.optInt("harmonyScore", fallback.harmonyScore).coerceIn(0, 100),
-                tensionScore = json.optInt("tensionScore", fallback.tensionScore).coerceIn(0, 100),
-                constructivePercentage = json.optInt("constructivePercentage", fallback.constructivePercentage).coerceIn(0, 100),
-                neutralPercentage = json.optInt("neutralPercentage", fallback.neutralPercentage).coerceIn(0, 100),
-                tensionPercentage = json.optInt("tensionPercentage", fallback.tensionPercentage).coerceIn(0, 100),
-                dominantEmotion = json.optString("dominantEmotion", fallback.dominantEmotion),
-                summaryEvaluation = json.optString("summaryEvaluation", fallback.summaryEvaluation),
-                flaggedSegments = if (flaggedList.isNotEmpty()) flaggedList else fallback.flaggedSegments,
+                overallTone = requiredText("overallTone"),
+                harmonyScore = requiredPercent("harmonyScore"),
+                tensionScore = requiredPercent("tensionScore"),
+                constructivePercentage = requiredPercent("constructivePercentage"),
+                neutralPercentage = requiredPercent("neutralPercentage"),
+                tensionPercentage = requiredPercent("tensionPercentage"),
+                dominantEmotion = requiredText("dominantEmotion"),
+                summaryEvaluation = requiredText("summaryEvaluation"),
+                flaggedSegments = flaggedList,
                 timestamp = System.currentTimeMillis()
             )
 
             Result.success(parsedSentiment)
-        } catch (e: Exception) {
-            Result.success(generateContextualSentimentFallback(session))
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            Result.failure(IllegalStateException("تحلیل لحن انجام نشد یا پاسخ سرویس نامعتبر بود."))
         }
-    }
-
-    fun generateContextualSentimentFallback(session: MeetingSession): AudioSentimentAnalysis {
-        val hasOps = session.opsData.enabled
-        val hasHr = session.hrData.enabled
-
-        val flagged = when {
-            hasOps -> listOf(
-                HighTensionSegment(
-                    timestampRange = "12:35 - 15:10",
-                    speaker = "سخنران جلسه",
-                    tensionLevel = "شدید",
-                    triggerTopic = "جریمه‌های دیرکرد تحویل و افت دمای زنجیره سرد در حمل دارو",
-                    quoteExcerpt = "«عدم تأمین سنسورهای تلپورت و تأخیر ترخیص گمرکی خط قرمز عملیات است؛ مسئولیت خسارت ۵۰۰ میلیون تومانی را واحد بازرگانی باید بپذیرد.»",
-                    reviewRecommendation = "برگزاری جلسه اضطراری بازبینی SLA لجستیک ۵PL و اصلاح شیوه‌نامه جبران خسارت بیمه محمولات با حضور مدیر بازرگانی",
-                    isReviewed = false,
-                    reviewNotes = ""
-                ),
-                HighTensionSegment(
-                    timestampRange = "28:40 - 31:15",
-                    speaker = "مدیر مالی",
-                    tensionLevel = "متوسط",
-                    triggerTopic = "انحراف بودجه خرید پالت‌های ایزو و سامانه هوشمند انبار سرد WMS",
-                    quoteExcerpt = "«سقف تخصیص اعتبارات سه‌ماهه سوم تکمیل شده و صدور پیش‌فاکتور جدید بدون مصوبه مجمع نقض آشکار انضباط مالی است.»",
-                    reviewRecommendation = "تنظیم تبصره متمم بودجه اضطراری با امضای مشترک مدیرعامل و سخنران پیش از ارسال به مجمع",
-                    isReviewed = false,
-                    reviewNotes = ""
-                )
-            )
-            hasHr -> listOf(
-                HighTensionSegment(
-                    timestampRange = "08:15 - 10:40",
-                    speaker = "مدیر منابع انسانی",
-                    tensionLevel = "شدید",
-                    triggerTopic = "مخالفت با پکیج حقوق درخواستی کاندیدای سرپرستی شبکه توزیع",
-                    quoteExcerpt = "«پرداخت پاداش خارج از گرید سازمانی موجب بی‌انگیزگی مدیران ارشد فعلی شرکت خواهد شد و خلاف آیین‌نامه استخدامی مصوب است.»",
-                    reviewRecommendation = "تدوین فرمول متغیر مبتنی بر شاخص KPI کاهش ضایعات انبار به جای افزایش پایه حقوق ثابت",
-                    isReviewed = false,
-                    reviewNotes = ""
-                ),
-                HighTensionSegment(
-                    timestampRange = "22:10 - 24:30",
-                    speaker = "رئیس هیئت‌مدیره",
-                    tensionLevel = "متوسط",
-                    triggerTopic = "طولانی شدن فرآیند جذب و نیاز فوری به پر کردن صندلی عملیاتی",
-                    quoteExcerpt = "«بیش از ۴۵ روز است پروژه توزیع استانی معطل تصمیم‌گیری کمیته جذب مانده و باید حداکثر تا پایان وقت فردا تعیین تکلیف شود.»",
-                    reviewRecommendation = "تعیین مهلت قطعی ۴۸ ساعته جهت امضای قرارداد مشروط با دوره آزمایشی سه‌ماهه",
-                    isReviewed = false,
-                    reviewNotes = ""
-                )
-            )
-            else -> listOf(
-                HighTensionSegment(
-                    timestampRange = "11:20 - 13:45",
-                    speaker = "سخنران",
-                    tensionLevel = "شدید",
-                    triggerTopic = "تأخیر مکرر در پاسخ‌گویی به استعلامات بین‌بخشی و تداخل وظایف",
-                    quoteExcerpt = "«فرآیندهای بروکراتیک فعلی موجب مسدود شدن عملیات تحویل اکسپرس شده و مصوبات قبلی توسط برخی واحدها پیگیری نشده است.»",
-                    reviewRecommendation = "الزام تمامی مدیران واحدها به فعال‌سازی اعلان‌های سیستمی و ارائه گزارش هفتگی به دبیرخانه",
-                    isReviewed = false,
-                    reviewNotes = ""
-                ),
-                HighTensionSegment(
-                    timestampRange = "25:10 - 27:30",
-                    speaker = "مدیرعامل",
-                    tensionLevel = "بحرانی",
-                    triggerTopic = "عدم دستیابی به تارگت‌های درآمدی سه‌ماهه دوم در بخش قراردادهای اختصاصی",
-                    quoteExcerpt = "«در صورتی که برنامه تحول درآمدی تا پایان ماه جاری محقق نشود، تجدید ساختار مدیریتی در دستور کار هیئت‌مدیره قرار خواهد گرفت.»",
-                    reviewRecommendation = "تدوین برنامه جبرانی فوری توسط کارگروه مشترک مالی-عملیاتی ظرف ۷۲ ساعت آینده",
-                    isReviewed = false,
-                    reviewNotes = ""
-                )
-            )
-        }
-
-        return AudioSentimentAnalysis(
-            overallTone = "جدی، متمرکز و همراه با چالش‌های ساختاری بر سر مسئولیت‌ها و ضرب‌الاجل‌ها",
-            harmonyScore = 72,
-            tensionScore = 28,
-            constructivePercentage = 65,
-            neutralPercentage = 20,
-            tensionPercentage = 15,
-            dominantEmotion = "مطالبه‌گری شفاف، تعهد به استانداردهای کیفیت و حساسیت نسبت به زمان",
-            summaryEvaluation = "تحلیل صوتی هوش مصنوعی Gemini نشان‌دهنده تعهد عمیق ارکان مدیریتی به حفظ کیفیت سازمانی است؛ با این حال، نقاط اصطکاک بر سر محدودیت‌های بودجه‌ای و هماهنگی بین‌بخشی نیازمند بازبینی و تدوین تعهدات شفاف جهت حل تعارض است.",
-            flaggedSegments = flagged,
-            timestamp = System.currentTimeMillis()
-        )
     }
 
     /**
@@ -1666,9 +1586,17 @@ $archiveSummary
     ): Result<AudioMeetingAnalysis> = withContext(Dispatchers.IO) {
         val apiKey = resolveApiKey(customApiKey)
         if (apiKey.isBlank()) {
-            return@withContext Result.success(
-                generatePostRecordingSummaryFallback(session, audioFile, durationSec)
-            )
+            return@withContext Result.failure(IllegalStateException("پیکربندی Gemini کامل نیست. فایل صوتی برای تحلیل مجدد در جلسه محفوظ است."))
+        }
+
+        if (audioFile == null || !audioFile.isFile || audioFile.length() !in 1..(20 * 1024 * 1024)) {
+            return@withContext Result.failure(IllegalArgumentException("برای تحلیل ضبط، فایل صوتی معتبر و حداکثر ۲۰ مگابایت لازم است."))
+        }
+
+        val audioBytes = try {
+            audioFile.readBytes()
+        } catch (_: java.io.IOException) {
+            return@withContext Result.failure(IllegalStateException("خواندن فایل صوتی ممکن نشد."))
         }
 
         val membersList = session.members.joinToString(", ") { "${it.name} (${it.title} - ${it.unit})" }
@@ -1715,27 +1643,19 @@ $liveTranscriptionsContext
             val contents = JSONArray().apply {
                 val contentObj = JSONObject().apply {
                     val parts = JSONArray().apply {
-                        if (audioFile != null && audioFile.exists() && audioFile.length() in 1..(20 * 1024 * 1024)) {
-                            try {
-                                val audioBytes = audioFile.readBytes()
-                                val base64Data = android.util.Base64.encodeToString(audioBytes, android.util.Base64.NO_WRAP)
-                                val mimeType = when (audioFile.extension.lowercase()) {
-                                    "wav" -> "audio/wav"
-                                    "mp3" -> "audio/mp3"
-                                    "aac" -> "audio/aac"
-                                    "ogg" -> "audio/ogg"
-                                    else -> "audio/mp4"
-                                }
-                                put(
-                                    JSONObject().apply {
-                                        put("inline_data", JSONObject().apply {
-                                            put("mime_type", mimeType)
-                                            put("data", base64Data)
-                                        })
-                                    }
-                                )
-                            } catch (ignored: Exception) {}
+                        val mimeType = when (audioFile.extension.lowercase()) {
+                            "wav" -> "audio/wav"
+                            "mp3" -> "audio/mp3"
+                            "aac" -> "audio/aac"
+                            "ogg" -> "audio/ogg"
+                            else -> "audio/mp4"
                         }
+                        put(JSONObject().apply {
+                            put("inline_data", JSONObject().apply {
+                                put("mime_type", mimeType)
+                                put("data", android.util.Base64.encodeToString(audioBytes, android.util.Base64.NO_WRAP))
+                            })
+                        })
                         put(JSONObject().apply { put("text", prompt) })
                     }
                     put("parts", parts)
@@ -1753,12 +1673,11 @@ $liveTranscriptionsContext
         val request = Request.Builder().url(url).header("x-goog-api-key", apiKey).post(requestBody).build()
 
         try {
-            val response = client.newCall(request).execute()
-            val responseString = response.body?.string().orEmpty()
-            if (!response.isSuccessful) {
-                return@withContext Result.success(
-                    generatePostRecordingSummaryFallback(session, audioFile, durationSec)
-                )
+            val responseString = client.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    return@withContext Result.failure(IllegalStateException("سرویس Gemini پاسخ موفق نداد (${response.code})."))
+                }
+                response.body?.string().orEmpty()
             }
 
             val rootJson = JSONObject(responseString)
@@ -1771,9 +1690,7 @@ $liveTranscriptionsContext
                 .orEmpty()
 
             if (rawText.isBlank()) {
-                return@withContext Result.success(
-                    generatePostRecordingSummaryFallback(session, audioFile, durationSec)
-                )
+                return@withContext Result.failure(IllegalStateException("Gemini پاسخی برای تحلیل ضبط برنگرداند."))
             }
 
             val cleanJson = rawText
@@ -1783,16 +1700,17 @@ $liveTranscriptionsContext
                 .trim()
 
             val parsed = JSONObject(cleanJson)
-            val fallback = generatePostRecordingSummaryFallback(session, audioFile, durationSec)
-
-            val transcription = parsed.optString("transcription", "").ifBlank { fallback.fullTranscription }
-            val summary = parsed.optString("executiveSummary", "").ifBlank { fallback.executiveSummary }
+            val transcription = (parsed.opt("transcription") as? String).orEmpty().trim()
+            val summary = (parsed.opt("executiveSummary") as? String).orEmpty().trim()
+            if (transcription.isBlank() || summary.isBlank()) {
+                return@withContext Result.failure(IllegalStateException("پاسخ Gemini متن یا خلاصهٔ کامل ضبط را ندارد."))
+            }
 
             val decisionsList = mutableListOf<String>()
             val decisionsArray = parsed.optJSONArray("keyDecisions")
             if (decisionsArray != null) {
                 for (i in 0 until decisionsArray.length()) {
-                    val d = decisionsArray.optString(i, "").trim()
+                    val d = (decisionsArray.opt(i) as? String).orEmpty().trim()
                     if (d.isNotBlank()) decisionsList.add(d)
                 }
             }
@@ -1802,12 +1720,14 @@ $liveTranscriptionsContext
             if (actionsArray != null) {
                 for (i in 0 until actionsArray.length()) {
                     val item = actionsArray.optJSONObject(i) ?: continue
+                    val title = (item.opt("title") as? String).orEmpty().trim()
+                    if (title.isBlank()) continue
                     actionItemsList.add(
                         ExtractedActionItem(
-                            title = item.optString("title", "پیگیری مصوبات جلسه"),
-                            assignee = item.optString("assignee", "سخنران"),
-                            deadline = item.optString("deadline", "فوری / جاری"),
-                            priority = item.optString("priority", "فوری")
+                            title = title,
+                            assignee = (item.opt("assignee") as? String).orEmpty().trim(),
+                            deadline = (item.opt("deadline") as? String).orEmpty().trim(),
+                            priority = (item.opt("priority") as? String).orEmpty().trim()
                         )
                     )
                 }
@@ -1817,94 +1737,18 @@ $liveTranscriptionsContext
                 AudioMeetingAnalysis(
                     fullTranscription = transcription,
                     executiveSummary = summary,
-                    keyDecisions = if (decisionsList.isNotEmpty()) decisionsList else fallback.keyDecisions,
-                    actionItems = if (actionItemsList.isNotEmpty()) actionItemsList else fallback.actionItems,
+                    keyDecisions = decisionsList,
+                    actionItems = actionItemsList,
                     audioDurationSec = if (durationSec > 0) durationSec else session.audioDurationSec,
-                    audioFileName = audioFile?.name ?: "meeting_audio.m4a",
+                    audioFileName = audioFile.name,
                     timestamp = System.currentTimeMillis()
                 )
             )
-        } catch (e: Exception) {
-            Result.success(
-                generatePostRecordingSummaryFallback(session, audioFile, durationSec)
-            )
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            Result.failure(IllegalStateException("تحلیل ضبط با Gemini انجام نشد. دوباره تلاش کنید."))
         }
-    }
-
-    fun generatePostRecordingSummaryFallback(
-        session: MeetingSession,
-        audioFile: File?,
-        durationSec: Long = session.audioDurationSec
-    ): AudioMeetingAnalysis {
-        val cleanTitle = session.title.ifBlank { "جلسه راهبردی هیئت‌مدیره" }
-        val effectiveDuration = if (durationSec > 0) durationSec else maxOf(1L, session.audioDurationSec)
-        val presentMembers = session.members.filter { it.isPresent }.joinToString("، ") { "${it.name} (${it.title})" }
-            .ifBlank { "سخنران (مدیر عملیات)، مدیرعامل و اعضای هیئت‌مدیره" }
-
-        val liveTranscriptText = if (session.transcriptions.isNotEmpty()) {
-            session.transcriptions.joinToString("\n") { "[${it.timeFormatted}] ${it.speaker}: ${it.text}" }
-        } else {
-            "سخنران: شاخص‌های عملکردی جلسه «$cleanTitle» بررسی شد و تصمیمات اجرایی جهت ابلاغ به واحدهای عملیاتی به تصویب رسید."
-        }
-
-        val extractedDecisions = buildList {
-            session.notes.forEach { note ->
-                add("${note.type} (${note.speaker}): ${note.text}")
-            }
-            if (session.opsData.enabled) {
-                add("تثبیت پایداری زنجیره سرد (${session.opsData.coldChain}) و ارتقای بهره‌وری ناوگان به ${session.opsData.fleetEff}")
-            }
-            if (session.hrData.enabled && session.hrData.candidate.isNotBlank()) {
-                add("تصمیم کمیته جذب برای ${session.hrData.candidate}: ${session.hrData.decision}")
-            }
-            if (isEmpty()) {
-                add("تصویب چارچوب اجرایی و زمان‌بندی پیگیری مصوبات جلسه «$cleanTitle»")
-                add("الزام به ثبت گزارش پیشرفت هفتگی در سامانه اطلس جلسه ۰۱ تحت نظارت سخنران")
-            }
-        }
-
-        val extractedActions = if (session.notes.isNotEmpty()) {
-            session.notes.map { note ->
-                ExtractedActionItem(
-                    title = note.text,
-                    assignee = note.speaker.ifBlank { "سخنران" },
-                    deadline = note.due.ifBlank { "فوری / جاری" },
-                    priority = if (note.type.contains("مصوبه") || note.due.contains("فوری")) "فوری" else "بالا"
-                )
-            }
-        } else {
-            listOf(
-                ExtractedActionItem(
-                    title = "پیگیری و اجرای مصوبات کلیدی استخراج‌شده از صوت جلسه «$cleanTitle»",
-                    assignee = "سخنران",
-                    deadline = "تا پایان هفته جاری",
-                    priority = "فوری"
-                )
-            )
-        }
-
-        val summaryParagraph = buildString {
-            append("خلاصه اجرایی خودکار پس از پایان ضبط صوت (مدل Gemini 2.5 Flash):\n")
-            append("در جلسه «$cleanTitle» مورخ ${session.date} که با حضور $presentMembers به مدت $effectiveDuration ثانیه ضبط و مستندسازی گردید، ")
-            append("مباحث محوری پیرامون پایش اهداف عملیاتی، ارزیابی تعهدات و اتخاذ تصمیمات اجرایی بررسی شد. ")
-            if (session.opsData.enabled) {
-                append("در بخش لجستیک ۵PL، وضعیت زنجیره سرد (${session.opsData.coldChain}) و بودجه عملیاتی (${session.opsData.budget.ifBlank { "مصوب" }}) مورد تأیید قرار گرفت. ")
-            }
-            if (session.hrData.enabled && session.hrData.candidate.isNotBlank()) {
-                append("همچنین پرونده جذب «${session.hrData.candidate}» برای جایگاه «${session.hrData.position}» با نتیجه «${session.hrData.decision}» جمع‌بندی شد. ")
-            }
-            append("\nهم‌اکنون ${extractedDecisions.size} تصمیم کلیدی و ${extractedActions.size} تعهد اجرایی در دیتابیس Room ذخیره و نمایه گردید.")
-        }
-
-        return AudioMeetingAnalysis(
-            fullTranscription = liveTranscriptText,
-            executiveSummary = summaryParagraph,
-            keyDecisions = extractedDecisions,
-            actionItems = extractedActions,
-            audioDurationSec = effectiveDuration,
-            audioFileName = audioFile?.name ?: "meeting_audio_${session.id}.m4a",
-            timestamp = System.currentTimeMillis()
-        )
     }
 
     /**
@@ -1920,9 +1764,7 @@ $liveTranscriptionsContext
     ): Result<List<MemberTaskEntity>> = withContext(Dispatchers.IO) {
         val apiKey = resolveApiKey(customApiKey)
         if (apiKey.isBlank()) {
-            return@withContext Result.success(
-                extractAssigneesAndTasksFallback(session, customMeetingText)
-            )
+            return@withContext Result.failure(IllegalStateException("تنظیمات Gemini برای استخراج وظایف کامل نیست."))
         }
 
         val membersList = session.members.joinToString("\n") {
@@ -1997,17 +1839,13 @@ ${if (customMeetingText.isNotBlank()) "متن تکمیلی جلسه جهت تح�
             client.newCall(request).execute().use { response ->
                 val bodyStr = response.body?.string() ?: ""
                 if (!response.isSuccessful) {
-                    return@withContext Result.success(
-                        extractAssigneesAndTasksFallback(session, customMeetingText)
-                    )
+                    return@withContext Result.failure(IllegalStateException("سرویس Gemini استخراج وظایف را انجام نداد."))
                 }
 
                 val rootJson = JSONObject(bodyStr)
                 val candidates = rootJson.optJSONArray("candidates")
                 if (candidates == null || candidates.length() == 0) {
-                    return@withContext Result.success(
-                        extractAssigneesAndTasksFallback(session, customMeetingText)
-                    )
+                    return@withContext Result.failure(IllegalStateException("پاسخ استخراج وظایف خالی است."))
                 }
 
                 val firstCandidate = candidates.getJSONObject(0)
@@ -2016,9 +1854,7 @@ ${if (customMeetingText.isNotBlank()) "متن تکمیلی جلسه جهت تح�
                 val rawJsonText = resParts?.optJSONObject(0)?.optString("text", "")?.trim() ?: ""
 
                 if (rawJsonText.isBlank()) {
-                    return@withContext Result.success(
-                        extractAssigneesAndTasksFallback(session, customMeetingText)
-                    )
+                    return@withContext Result.failure(IllegalStateException("پاسخ استخراج وظایف کامل نیست."))
                 }
 
                 val cleanJson = rawJsonText
@@ -2028,35 +1864,38 @@ ${if (customMeetingText.isNotBlank()) "متن تکمیلی جلسه جهت تح�
                     .trim()
 
                 val parsed = JSONObject(cleanJson)
-                val tasksArray = parsed.optJSONArray("tasks")
+                val tasksArray = parsed.getJSONArray("tasks")
                 val extractedList = mutableListOf<MemberTaskEntity>()
+                val source = listOf(customMeetingText) + session.notes.map { it.text } +
+                    session.transcriptions.map { it.text }
 
-                if (tasksArray != null) {
+                run {
                     for (i in 0 until tasksArray.length()) {
                         val obj = tasksArray.optJSONObject(i) ?: continue
-                        val assignee = obj.optString("assigneeName", "سخنران").ifBlank { "سخنران" }
+                        val assignee = obj.optString("assigneeName", "").trim()
                         val matchedMember = session.members.find {
-                            it.name.contains(assignee) || assignee.contains(it.name)
+                            assignee.isNotBlank() && it.name.equals(assignee, ignoreCase = true)
                         }
                         val role = obj.optString("assigneeRole", matchedMember?.title ?: "مسئول اجرایی")
                         val title = obj.optString("taskTitle", "").trim()
                         if (title.isBlank()) continue
                         val desc = obj.optString("taskDescription", title)
-                        val deadlineLbl = obj.optString("deadlineLabel", "تا پایان هفته")
+                        val deadlineLbl = obj.optString("deadlineLabel", "").trim()
                         val rawCalDate = obj.optString("calendarDate", "")
                         val calDate = if (rawCalDate.matches(Regex("\\d{4}/\\d{2}/\\d{2}"))) {
                             rawCalDate
                         } else {
-                            normalizeCalendarDateFromDeadline(session.date, deadlineLbl, i)
+                            ""
                         }
                         val priority = obj.optString("priority", "بالا")
-                        val quote = obj.optString("sourceQuote", title)
+                        val quote = obj.optString("sourceQuote", "").trim()
+                        if (quote.isBlank() || source.none { it.contains(quote) }) continue
 
                         extractedList.add(
                             MemberTaskEntity(
                                 sessionId = session.id,
                                 sessionTitle = session.title.ifBlank { "جلسه سازمانی" },
-                                assigneeName = assignee,
+                                assigneeName = assignee.ifBlank { "OWNER_REQUIRED" },
                                 assigneeRole = role,
                                 taskTitle = title,
                                 taskDescription = desc,
@@ -2065,7 +1904,7 @@ ${if (customMeetingText.isNotBlank()) "متن تکمیلی جلسه جهت تح�
                                 priority = priority,
                                 status = "IN_PROGRESS",
                                 isDone = false,
-                                isAddedToCalendar = true,
+                                isAddedToCalendar = calDate.isNotBlank(),
                                 isAddedToMemberTaskList = true,
                                 sourceQuote = quote
                             )
@@ -2073,177 +1912,13 @@ ${if (customMeetingText.isNotBlank()) "متن تکمیلی جلسه جهت تح�
                     }
                 }
 
-                if (extractedList.isEmpty()) {
-                    Result.success(extractAssigneesAndTasksFallback(session, customMeetingText))
-                } else {
-                    Result.success(extractedList)
-                }
+                Result.success(extractedList)
             }
-        } catch (e: Exception) {
-            Result.success(extractAssigneesAndTasksFallback(session, customMeetingText))
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            Result.failure(IllegalStateException("استخراج وظایف انجام نشد یا پاسخ سرویس نامعتبر بود."))
         }
-    }
-
-    fun extractAssigneesAndTasksFallback(
-        session: MeetingSession,
-        customMeetingText: String = ""
-    ): List<MemberTaskEntity> {
-        val result = mutableListOf<MemberTaskEntity>()
-        val sessionTitle = session.title.ifBlank { "جلسه راهبردی هیئت‌مدیره" }
-
-        // 1. Parse customMeetingText if provided by user
-        if (customMeetingText.isNotBlank()) {
-            val lines = customMeetingText.split("\n", "؛", ".").map { it.trim() }.filter { it.length > 8 }
-            lines.forEachIndexed { idx, line ->
-                val matchedMember = session.members.find { line.contains(it.name) }
-                val assignee = when {
-                    matchedMember != null -> matchedMember.name
-                    line.contains("سخنران") || line.contains("سخنران") -> "سخنران"
-                    line.contains("مدیر مالی") -> "مدیر مالی و ذی‌حساب"
-                    line.contains("کنترل کیفیت") -> "مدیر تضمین کیفیت (QA)"
-                    line.contains("فناوری") || line.contains("IT") -> "مدیر فناوری اطلاعات"
-                    else -> session.members.getOrNull(idx % maxOf(1, session.members.size))?.name ?: "سخنران"
-                }
-                val role = session.members.find { it.name == assignee }?.title ?: "مسئول پیگیری مصوبه"
-                val deadlineLbl = when {
-                    line.contains("فردا") -> "فردا"
-                    line.contains("فوری") -> "فوری (۴۸ ساعت)"
-                    line.contains("هفته") -> "تا پایان هفته جاری"
-                    line.contains("ماه") -> "تا پایان ماه جاری"
-                    else -> "تا ۲۰ آبان ۱۴۰۵"
-                }
-                val calDate = normalizeCalendarDateFromDeadline(session.date, deadlineLbl, idx)
-                val priority = if (line.contains("فوری") || line.contains("بحران") || line.contains("الزامی")) "فوری" else "بالا"
-
-                result.add(
-                    MemberTaskEntity(
-                        sessionId = session.id,
-                        sessionTitle = sessionTitle,
-                        assigneeName = assignee,
-                        assigneeRole = role,
-                        taskTitle = line,
-                        taskDescription = "استخراج‌شده از متن جلسه «$sessionTitle» جهت اقدام توسط $assignee",
-                        deadlineLabel = deadlineLbl,
-                        calendarDate = calDate,
-                        priority = priority,
-                        status = "IN_PROGRESS",
-                        isDone = false,
-                        isAddedToCalendar = true,
-                        isAddedToMemberTaskList = true,
-                        sourceQuote = line
-                    )
-                )
-            }
-        }
-
-        // 2. Extract from session notes (action items / resolutions)
-        session.notes.forEachIndexed { idx, note ->
-            val assignee = note.speaker.ifBlank { "سخنران" }
-            val matchedMember = session.members.find { it.name == assignee || assignee.contains(it.name) }
-            val role = matchedMember?.title ?: "عضو کارگروه اجرایی"
-            val deadlineLbl = note.due.ifBlank { "تا پایان هفته" }
-            val calDate = normalizeCalendarDateFromDeadline(session.date, deadlineLbl, idx)
-            val priority = when {
-                note.type.contains("مصوبه") || deadlineLbl.contains("فوری") -> "فوری"
-                note.type.contains("مالی") -> "بالا"
-                else -> "متوسط"
-            }
-
-            if (result.none { it.taskTitle == note.text && it.assigneeName == assignee }) {
-                result.add(
-                    MemberTaskEntity(
-                        sessionId = session.id,
-                        sessionTitle = sessionTitle,
-                        assigneeName = assignee,
-                        assigneeRole = role,
-                        taskTitle = note.text,
-                        taskDescription = "وظیفه استخراج‌شده از ${note.type} در جلسه «$sessionTitle»",
-                        deadlineLabel = deadlineLbl,
-                        calendarDate = calDate,
-                        priority = priority,
-                        status = if (note.isDone) "COMPLETED" else "IN_PROGRESS",
-                        isDone = note.isDone,
-                        isAddedToCalendar = true,
-                        isAddedToMemberTaskList = true,
-                        sourceQuote = "[${note.speaker}]: ${note.text}"
-                    )
-                )
-            }
-        }
-
-        // 3. Extract from live transcriptions if notes were empty
-        if (result.isEmpty() && session.transcriptions.isNotEmpty()) {
-            session.transcriptions.forEachIndexed { idx, seg ->
-                val assignee = seg.speaker.ifBlank { "سخنران" }
-                val role = session.members.find { it.name == assignee }?.title ?: "مسئول اجرایی"
-                val calDate = normalizeCalendarDateFromDeadline(session.date, "تا پایان هفته", idx)
-                result.add(
-                    MemberTaskEntity(
-                        sessionId = session.id,
-                        sessionTitle = sessionTitle,
-                        assigneeName = assignee,
-                        assigneeRole = role,
-                        taskTitle = seg.text,
-                        taskDescription = "وظیفه استخراج‌شده از مذاکرات صوتی جلسه (${seg.timeFormatted})",
-                        deadlineLabel = "تا پایان هفته جاری",
-                        calendarDate = calDate,
-                        priority = "بالا",
-                        status = "IN_PROGRESS",
-                        isDone = false,
-                        isAddedToCalendar = true,
-                        isAddedToMemberTaskList = true,
-                        sourceQuote = "${seg.speaker}: ${seg.text}"
-                    )
-                )
-            }
-        }
-
-        // 4. Default strategic tasks if session has no notes/transcriptions/customText yet
-        if (result.isEmpty()) {
-            val leadMember = session.members.firstOrNull()?.name ?: "سخنران"
-            val leadRole = session.members.firstOrNull()?.title ?: "مدیر عملیات و لجستیک ۵PL"
-            val secondMember = session.members.getOrNull(1)?.name ?: "مدیر تضمین کیفیت (QA)"
-            val secondRole = session.members.getOrNull(1)?.title ?: "مسئول کنترل کیفیت و استانداردها"
-
-            result.add(
-                MemberTaskEntity(
-                    sessionId = session.id,
-                    sessionTitle = sessionTitle,
-                    assigneeName = leadMember,
-                    assigneeRole = leadRole,
-                    taskTitle = "ممیزی و کالیبراسیون سنسورهای زنجیره سرد و پایش آنلاین دمای ناوگان",
-                    taskDescription = "بررسی انطباق ۱۰۰٪ ناوگان حمل دارو با استاندارد WHO GDP و ثبت گزارش در برج کنترل",
-                    deadlineLabel = "۱۸ آبان ۱۴۰۵",
-                    calendarDate = normalizeCalendarDateFromDeadline(session.date, "1405/08/18", 0),
-                    priority = "فوری",
-                    status = "IN_PROGRESS",
-                    isDone = false,
-                    isAddedToCalendar = true,
-                    isAddedToMemberTaskList = true,
-                    sourceQuote = "تکلیف مقرر برای $leadMember جهت پایش زنجیره سرد"
-                )
-            )
-            result.add(
-                MemberTaskEntity(
-                    sessionId = session.id,
-                    sessionTitle = sessionTitle,
-                    assigneeName = secondMember,
-                    assigneeRole = secondRole,
-                    taskTitle = "تدوین شیوه‌نامه SLA و پیوست بیمه‌ای جرایم تأخیر محمولات",
-                    taskDescription = "بازنگری قراردادهای پیمانکاران حمل و ارائه نسخه نهایی به هیئت‌مدیره",
-                    deadlineLabel = "۲۰ آبان ۱۴۰۵",
-                    calendarDate = normalizeCalendarDateFromDeadline(session.date, "1405/08/20", 1),
-                    priority = "بالا",
-                    status = "IN_PROGRESS",
-                    isDone = false,
-                    isAddedToCalendar = true,
-                    isAddedToMemberTaskList = true,
-                    sourceQuote = "تکلیف مقرر برای $secondMember جهت تدوین SLA"
-                )
-            )
-        }
-
-        return result
     }
 
     /**

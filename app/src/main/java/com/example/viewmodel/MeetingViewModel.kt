@@ -125,8 +125,10 @@ class MeetingViewModel internal constructor(
     private val _lastExtractedMemberTasks = MutableStateFlow<List<MemberTaskEntity>>(emptyList())
     val lastExtractedMemberTasks: StateFlow<List<MemberTaskEntity>> = _lastExtractedMemberTasks.asStateFlow()
 
-    private val _autoSyncExtractedTasksToDbAndCalendar = MutableStateFlow(true)
-    val autoSyncExtractedTasksToDbAndCalendar: StateFlow<Boolean> = _autoSyncExtractedTasksToDbAndCalendar.asStateFlow()
+    private val _pendingMemberTasks = MutableStateFlow<List<MemberTaskEntity>>(emptyList())
+    val pendingMemberTasks: StateFlow<List<MemberTaskEntity>> = _pendingMemberTasks.asStateFlow()
+    private val _isSavingApprovedTask = MutableStateFlow(false)
+    val isSavingApprovedTask: StateFlow<Boolean> = _isSavingApprovedTask.asStateFlow()
 
     @OptIn(ExperimentalCoroutinesApi::class)
     val roomExecutiveSummaries: StateFlow<List<ExecutiveSummaryEntity>> = activeSession
@@ -1823,29 +1825,6 @@ class MeetingViewModel internal constructor(
                 )
                 _lastPersistedRoomSummary.value = persistedSummary
 
-                if (_autoSyncExtractedTasksToDbAndCalendar.value && analysis.actionItems.isNotEmpty()) {
-                    val mappedTasks = analysis.actionItems.mapIndexed { idx, item ->
-                        val matchedRole = current.members.find { it.name.contains(item.assignee) || item.assignee.contains(it.name) }?.title ?: "مسئول اجرایی"
-                        MemberTaskEntity(
-                            sessionId = current.id,
-                            sessionTitle = current.title.ifBlank { "جلسه سازمانی" },
-                            assigneeName = item.assignee.ifBlank { "سخنران" },
-                            assigneeRole = matchedRole,
-                            taskTitle = item.title,
-                            taskDescription = "استخراج‌شده از متن مذاکرات جلسه «${current.title}»",
-                            deadlineLabel = item.deadline,
-                            calendarDate = geminiService.normalizeCalendarDateFromDeadline(current.date, item.deadline, idx),
-                            priority = item.priority,
-                            status = "IN_PROGRESS",
-                            isDone = false,
-                            isAddedToCalendar = true,
-                            isAddedToMemberTaskList = true,
-                            sourceQuote = item.title
-                        )
-                    }
-                    val persisted = memberTaskRepository.saveExtractedMemberTasks(current.id, mappedTasks)
-                    _lastExtractedMemberTasks.value = persisted
-                }
                 _userMessage.value = "✅ رونوشت صوتی بلافاصله با Gemini تلخیص شد: ${analysis.keyDecisions.size} تصمیم کلیدی و ${analysis.actionItems.size} اقدام اجرایی استخراج گردید."
             }.onFailure { ex ->
                 val errMsg = ex.message ?: "خطا در تحلیل متن مذاکرات با Gemini"
@@ -2572,69 +2551,71 @@ class MeetingViewModel internal constructor(
         _userMessage.value = "تحلیل احساسات و بخش‌های تنش بازنشانی شد."
     }
 
-    // --- Gemini Extraction of Assignees & Action Items -> Auto-Add to Calendar & Member Task List in Room ---
-    fun setAutoSyncExtractedTasksToDbAndCalendar(enabled: Boolean) {
-        _autoSyncExtractedTasksToDbAndCalendar.value = enabled
+    fun extractMemberTaskSuggestions(customMeetingText: String = "") {
+        if (_isExtractingMemberTasks.value || _isSavingApprovedTask.value) return
+        val current = activeSession.value
+        val previous = _pendingMemberTasks.value.filter { it.sessionId == current.id }
+        if (previous.isNotEmpty()) return
+        _isExtractingMemberTasks.value = true
+        _memberTaskExtractionError.value = null
+        viewModelScope.launch {
+            try {
+                val result = geminiService.extractAssigneesAndActionItemsFromMeetingText(
+                    session = current,
+                    customMeetingText = customMeetingText,
+                    customApiKey = geminiApiKey.value
+                )
+                if (activeSession.value.id != current.id) return@launch
+                result.onSuccess { tasks ->
+                    _pendingMemberTasks.value = tasks.distinctBy {
+                        it.assigneeName.trim() to it.taskTitle.trim()
+                    }.map { it.copy(isAddedToCalendar = false, isAddedToMemberTaskList = false) }
+                    _userMessage.value = if (tasks.isEmpty()) "پیشنهاد قابل استنادی پیدا نشد."
+                        else "وظایف پیشنهادی آمادهٔ بازبینی هستند."
+                }.onFailure { error ->
+                    _memberTaskExtractionError.value = error.localizedMessage ?: "خطا در استخراج وظایف"
+                }
+            } finally {
+                _isExtractingMemberTasks.value = false
+            }
+        }
     }
 
-    fun extractAndAutoAssignMemberTasksWithGemini(customMeetingText: String = "") {
+    fun dismissMemberTaskSuggestion(task: MemberTaskEntity) {
+        if (_isSavingApprovedTask.value || task.sessionId != activeSession.value.id) return
+        _pendingMemberTasks.value = _pendingMemberTasks.value - task
+    }
+
+    fun approveMemberTaskSuggestion(task: MemberTaskEntity) {
+        if (_isSavingApprovedTask.value || _isExtractingMemberTasks.value) return
+        val sessionId = activeSession.value.id
+        if (task.sessionId != sessionId || task !in _pendingMemberTasks.value) return
+        if (task.assigneeName.isBlank() || task.assigneeName.equals("OWNER_REQUIRED", ignoreCase = true)) {
+            _memberTaskExtractionError.value = "پیشنهاد بدون مسئول قابل ثبت نیست."
+            return
+        }
+        _isSavingApprovedTask.value = true
+        _memberTaskExtractionError.value = null
         viewModelScope.launch {
-            _isExtractingMemberTasks.value = true
-            _memberTaskExtractionError.value = null
-            val current = activeSession.value
-            val apiKey = geminiApiKey.value
-
-            val result = geminiService.extractAssigneesAndActionItemsFromMeetingText(
-                session = current,
-                customMeetingText = customMeetingText,
-                customApiKey = apiKey
-            )
-
-            if (activeSession.value.id != current.id) {
-                _isExtractingMemberTasks.value = false
-                return@launch
-            }
-            result.onSuccess { extractedTasks ->
-                val autoSync = _autoSyncExtractedTasksToDbAndCalendar.value
-                val persisted = if (autoSync) {
-                    memberTaskRepository.saveExtractedMemberTasks(
-                        sessionId = current.id,
-                        tasks = extractedTasks
-                    )
-                } else {
-                    extractedTasks
+            try {
+                val approved = task.copy(
+                    isAddedToCalendar = task.calendarDate.isNotBlank(),
+                    isAddedToMemberTaskList = true
+                )
+                memberTaskRepository.saveExtractedMemberTasks(sessionId, listOf(approved))
+                _pendingMemberTasks.value = _pendingMemberTasks.value - task
+                if (activeSession.value.id == sessionId) {
+                    _userMessage.value = if (approved.isAddedToCalendar) "وظیفه در کارتابل و تقویم جلسه ثبت شد."
+                        else "وظیفه بدون موعد در کارتابل ثبت شد."
                 }
-                _isExtractingMemberTasks.value = false
-
-                val latest = activeSession.value
-                if (latest.id != current.id) return@onSuccess
-                _lastExtractedMemberTasks.value = persisted
-                if (!autoSync) {
-                    _userMessage.value = "تعداد پیشنهادهای وظیفه: ${persisted.size}"
-                    return@onSuccess
+            } catch (error: kotlinx.coroutines.CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                if (activeSession.value.id == sessionId) {
+                    _memberTaskExtractionError.value = "ثبت وظیفه انجام نشد. دوباره تلاش کنید."
                 }
-                // Also synchronize newly discovered action items into active session notes if not already present
-                val existingTexts = latest.notes.map { it.text.trim() }.toSet()
-                val newNotesFromTasks = persisted.filter { it.taskTitle.trim() !in existingTexts }.map { task ->
-                    MeetingNote(
-                        timeFormatted = formatClock(latest.elapsedSeconds),
-                        speaker = task.assigneeName,
-                        text = task.taskTitle,
-                        type = if (task.priority == "فوری") "🚨 مصوبه رسمی" else "📌 تعهد اجرایی",
-                        due = listOf(task.deadlineLabel, task.calendarDate).filter { it.isNotBlank() }.distinct().joinToString(" · "),
-                        isDone = task.isDone
-                    )
-                }
-                if (newNotesFromTasks.isNotEmpty()) {
-                    save(latest.copy(notes = latest.notes + newNotesFromTasks))
-                }
-
-                val distinctAssignees = persisted.map { it.assigneeName }.distinct().size
-                _userMessage.value = "${persisted.size} وظیفه محوله برای $distinctAssignees عضو مسئول با Gemini استخراج و به تقویم و کارتابل دیتابیس Room اضافه شد."
-            }.onFailure { err ->
-                _isExtractingMemberTasks.value = false
-                _memberTaskExtractionError.value = err.localizedMessage ?: "خطا در استخراج وظایف اعضا"
-                _userMessage.value = "خطا در استخراج وظایف: ${err.localizedMessage}"
+            } finally {
+                _isSavingApprovedTask.value = false
             }
         }
     }

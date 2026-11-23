@@ -1495,27 +1495,44 @@ class ExampleRobolectricTest {
     }
 
     @Test
-    fun `test ViewModel extractAndAutoAssignMemberTasksWithGemini automatically adds tasks to Room database and calendar`() = kotlinx.coroutines.runBlocking {
-        val app = ApplicationProvider.getApplicationContext<android.app.Application>()
-        val customText = "مقرر شد سخنران تا 1405/08/20 مستندات ممیزی زنجیره سرد را نهایی کند."
+    fun `task suggestions need explicit approval before Room and calendar persistence`() = kotlinx.coroutines.runBlocking {
+        val app = ApplicationProvider.getApplicationContext<Application>()
+        val customText = "مقرر شد سخنران تا 1405/08/20 گزارش را نهایی کند."
         val vm = MeetingViewModel(app, fixtureGemini(taskFixture(customText)))
         vm.startNewBlankSession()
         vm.setGeminiApiKey("fixture")
-        vm.extractAndAutoAssignMemberTasksWithGemini(customText)
 
-        for (i in 0 until 60) {
-            org.robolectric.shadows.ShadowLooper.idleMainLooper()
-            if (vm.lastExtractedMemberTasks.value.isNotEmpty() && !vm.isExtractingMemberTasks.value) break
-            kotlinx.coroutines.delay(25)
+        suspend fun extract(): com.example.data.local.MemberTaskEntity {
+            vm.extractMemberTaskSuggestions(customText)
+            kotlinx.coroutines.withTimeout(10_000) {
+                while (vm.isExtractingMemberTasks.value) {
+                    org.robolectric.shadows.ShadowLooper.idleMainLooper()
+                    kotlinx.coroutines.delay(25)
+                }
+            }
+            return vm.pendingMemberTasks.value.single()
         }
 
-        val extracted = vm.lastExtractedMemberTasks.value
-        assertTrue("Extracted member tasks must not be empty", extracted.isNotEmpty())
-        assertTrue("Must contain task assigned to Atlas Team", extracted.any { it.assigneeName.contains("سخنران") })
+        val rejected = extract()
+        assertTrue(vm.getMemberTasksForSessionFromRoomOnce().isEmpty())
+        vm.dismissMemberTaskSuggestion(rejected)
+        assertTrue(vm.pendingMemberTasks.value.isEmpty())
+        assertTrue(vm.getMemberTasksForSessionFromRoomOnce().isEmpty())
 
-        val persistedInRoom = vm.getMemberTasksForSessionFromRoomOnce()
-        assertTrue("Extracted tasks must be automatically persisted in Room member_tasks table", persistedInRoom.isNotEmpty())
-        assertTrue("Tasks in Room must have calendarDate populated for Calendar view", persistedInRoom.all { it.calendarDate.isNotBlank() })
+        val approved = extract()
+        vm.approveMemberTaskSuggestion(approved)
+        vm.approveMemberTaskSuggestion(approved)
+        kotlinx.coroutines.withTimeout(10_000) {
+            while (vm.isSavingApprovedTask.value) {
+                org.robolectric.shadows.ShadowLooper.idleMainLooper()
+                kotlinx.coroutines.delay(25)
+            }
+        }
+        val persisted = vm.getMemberTasksForSessionFromRoomOnce().single()
+        assertEquals(approved.taskTitle, persisted.taskTitle)
+        assertTrue(persisted.isAddedToCalendar)
+        assertEquals("1405/08/20", persisted.calendarDate)
+        assertTrue(vm.pendingMemberTasks.value.isEmpty())
     }
 
     @Test
@@ -1623,15 +1640,17 @@ class ExampleRobolectricTest {
         val vm = MeetingViewModel(app)
         vm.loadScenario("board_cold_chain")
 
-        // 1. Extract and persist board member action items into Room
-        vm.extractAndAutoAssignMemberTasksWithGemini(
-            customMeetingText = "مصوب شد سخنران تا پایان هفته سامانه پایش زنجیره سرد را راه‌اندازی نماید. همچنین سارا احمدی موظف شد گزارش حسابرسی انبار را تا فردا تحویل دهد."
+        val repository = com.example.data.local.MemberTaskRepository(
+            com.example.data.local.AtlasDatabase.getInstance(app).memberTaskDao()
         )
-        for (i in 0 until 60) {
-            org.robolectric.shadows.ShadowLooper.idleMainLooper()
-            if (!vm.isExtractingMemberTasks.value && vm.lastExtractedMemberTasks.value.isNotEmpty()) break
-            kotlinx.coroutines.delay(25)
-        }
+        val session = vm.activeSession.value
+        repository.saveExtractedMemberTasks(session.id, listOf(
+            com.example.data.local.MemberTaskEntity(
+                sessionId = session.id, sessionTitle = session.title,
+                assigneeName = "سخنران", taskTitle = "وظیفهٔ تأییدشدهٔ آزمون",
+                deadlineLabel = "1405/08/20", calendarDate = "1405/08/20", isAddedToCalendar = true
+            )
+        ))
 
         val roomTasks = vm.getMemberTasksForSessionFromRoomOnce()
         assertTrue("Room member_tasks table must contain extracted board member tasks", roomTasks.isNotEmpty())
@@ -1648,7 +1667,7 @@ class ExampleRobolectricTest {
         val rasoolStats = analytics.boardMembers.find { it.name.contains("سخنران") }
         assertNotNull("Atlas Team must be present in quarterly board member analytics", rasoolStats)
         assertTrue("Attendance frequency over last quarter must be > 0", rasoolStats!!.sessionsPresent > 0)
-        assertTrue("Volume of assigned action items must include Room tasks", rasoolStats.totalActions >= 2)
+        assertTrue("Volume of assigned action items must include Room tasks", rasoolStats.totalActions >= 1)
 
         // 3. Verify Smart Meeting Minutes Filter state updates (محدوده جلسه, وضعیت مصوبه, عضو مسئول)
         vm.updateListFilterScope("internal")
